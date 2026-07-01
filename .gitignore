@@ -1,0 +1,48 @@
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+
+# 虚拟环境
+venv/
+env/
+.venv/
+.env/
+
+# PyInstaller 打包文件
+build/
+dist/
+*.spec.bak
+
+# 可执行文件
+*.exe
+
+# 日志文件
+*.log
+pet_log.txt
+pet_run_log.txt
+jump_log.txt
+debug.log
+
+# 个人文件
+selfonly.md
+
+# 个人设置文件
+.debug_pet_settings
+
+# 编辑器/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 压缩包
+*.zip

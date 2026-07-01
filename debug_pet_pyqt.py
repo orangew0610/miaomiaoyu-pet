@@ -1,0 +1,2107 @@
+#!/usr/bin/env python3
+"""
+Debug Pet - 桌面宠物Debugger (PyQt5 版本)
+"""
+
+import sys
+import os
+import random
+import subprocess
+import tempfile
+import re
+import json
+from datetime import datetime
+
+# PyQt5 导入
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QMenu, QMessageBox,
+    QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, 
+    QScrollArea, QFrame, QDialog, QLineEdit, QFileDialog, QComboBox
+)
+from PyQt5.QtCore import (
+    Qt, QTimer, QPoint, QPropertyAnimation, 
+    QEasingCurve, QRect, pyqtSignal, QThread
+)
+from PyQt5.QtGui import (
+    QMovie, QPixmap, QImage, QPainter, QPen, QColor,
+    QCursor, QIcon, QFont, QKeySequence
+)
+from PyQt5.QtNetwork import QLocalSocket, QLocalServer
+
+# 尝试导入 requests（用于 AI 检测）
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+# ============== 配置 ==============
+APP_NAME = "Debug Pet"
+VERSION = "1.0.0"
+GIF_DIR = "miaomiao-all-actions"
+
+# 获取资源文件路径（支持 PyInstaller 打包）
+def get_resource_path(relative_path):
+    """获取资源文件的绝对路径"""
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
+
+GIF_DIR_FULL = get_resource_path(GIF_DIR)
+
+# 宠物状态
+PET_STATE_IDLE = "idle"
+PET_STATE_WALKING = "walking"
+PET_STATE_WALKING_LEFT = "walking_left"
+PET_STATE_WALKING_RIGHT = "walking_right"
+PET_STATE_JUMPING = "jumping"
+PET_STATE_JUMPING_LEFT = "jumping_left"
+PET_STATE_JUMPING_RIGHT = "jumping_right"
+PET_STATE_THINKING = "thinking"
+PET_STATE_HAPPY = "happy"
+PET_STATE_SAD = "sad"
+PET_STATE_WAITING = "waiting"
+PET_STATE_FAILED = "failed"
+
+# GIF 文件映射
+GIF_FILES = {
+    PET_STATE_IDLE: ['idle1.gif', 'idle2.gif', 'idle3.gif'],
+    PET_STATE_WALKING_LEFT: 'running-right.gif',
+    PET_STATE_WALKING_RIGHT: 'running-right.gif',
+    PET_STATE_JUMPING_LEFT: 'jumping-left.gif',
+    PET_STATE_JUMPING_RIGHT: 'jumping-left.gif',
+    PET_STATE_THINKING: 'rewiew.gif',
+    PET_STATE_HAPPY: 'waving.gif',
+    PET_STATE_SAD: 'failed.gif',
+    PET_STATE_WAITING: 'waiting.gif',
+    PET_STATE_FAILED: 'failed.gif',
+}
+
+# 气泡颜色
+STATE_COLORS = {
+    PET_STATE_IDLE: "#D1C4E9",    # 紫色（浅紫）
+    PET_STATE_WALKING: "#CE93D8", # 紫色（稍深紫）
+    PET_STATE_THINKING: "#B3E5FC",# 天蓝色（浅天蓝）
+    PET_STATE_HAPPY: "#F8BBD0",   # 粉色（粉红）
+    PET_STATE_SAD: "#C5CAE9",     # 灰紫色（淡紫灰）
+    PET_STATE_WAITING: "#FFCDD2", # 红色（淡红）
+    PET_STATE_FAILED: "#C5CAE9",  # 灰紫色（同SAD）
+}
+
+
+# ============== PyQt5 主窗口类 ==============
+class PetWindow(QWidget):
+    """宠物主窗口 - 使用 PyQt5 实现透明背景"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # 宠物位置
+        self.pet_x = 100
+        self.pet_y = 100
+        self.pet_width = 300
+        self.pet_height = 300
+        
+        # 移动相关
+        self.is_moving = False
+        self.is_dragging = False
+        self.walk_direction = 1
+        
+        # 拖拽速度
+        self.drag_velocity_x = 0
+        self.drag_velocity_y = 0
+        self.drag_last_x = 0
+        self.drag_last_y = 0
+        self.drag_last_time = datetime.now()
+        
+        # 互动时间
+        self.last_interaction_time = datetime.now()
+        
+        # 初始化 UI（包含加载动画）
+        self._init_ui()
+        
+        # 设置定时器
+        self._setup_timers()
+        
+        # 启动移动定时器
+        self.move_timer.start()
+    
+    def _init_ui(self):
+        """初始化 UI"""
+        # 窗口配置
+        self.setWindowTitle(APP_NAME)
+        self.setWindowFlags(
+            Qt.Window | 
+            Qt.FramelessWindowHint |  # 无边框
+            Qt.WindowStaysOnTopHint |   # 置顶
+            Qt.Tool                    # 不在任务栏显示
+        )
+        
+        # 设置透明背景（关键！）
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        
+        # 设置窗口大小和位置
+        self.setGeometry(self.pet_x, self.pet_y, self.pet_width, self.pet_height)
+        
+        # 创建宠物标签
+        self.pet_label = QLabel(self)
+        self.pet_label.setGeometry(0, 0, self.pet_width, self.pet_height)
+        self.pet_label.setAlignment(Qt.AlignCenter)
+        self.pet_label.setScaledContents(True)
+        
+        # 设置鼠标跟踪
+        self.setMouseTracking(True)
+        self.pet_label.setMouseTracking(True)
+        
+        # 设置光标
+        self.setCursor(QCursor(Qt.OpenHandCursor))
+        
+        # 气泡窗口（独立窗口，避免被裁剪）
+        self.bubble_window = QWidget()
+        self.bubble_window.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.Tool
+        )
+        self.bubble_window.setAttribute(Qt.WA_TranslucentBackground)
+        
+        self.bubble_label = QLabel(self.bubble_window)
+        self.bubble_label.setAlignment(Qt.AlignCenter)
+        self.bubble_label.setTextFormat(Qt.PlainText)
+        self.bubble_label.setWordWrap(True)
+        
+        self.bubble_window.hide()
+        
+        # 祁煜语录列表
+        self._init_qi_yu_quotes()
+        
+        # 先加载动画，再设置状态
+        self.current_state = PET_STATE_IDLE
+        self.current_sub_index = 0
+        self.idle_switch_count = 0
+        self.last_idle_switch_time = datetime.now()
+        self.idle_movies = []
+        
+        # 移动相关
+        self.target_x = 0
+        self.target_y = 0
+        self.walk_direction = 1
+        self.move_speed = 3
+        
+        # 加载动画
+        self._load_pet_frames()
+        
+        # 加载完成后设置初始状态
+        self._set_state(PET_STATE_IDLE)
+        
+        # 开始宠物行为
+        self._schedule_next_action()
+        
+        # 开始气泡说话
+        self._schedule_say_quote()
+        
+        # 启动时打招呼
+        QTimer.singleShot(1500, self._greet_on_start)
+    
+    def _load_pet_frames(self):
+        """加载宠物动画帧 - 支持翻转"""
+        from PIL import Image
+        
+        # 需要翻转的状态
+        flip_states = {PET_STATE_WALKING_LEFT, PET_STATE_JUMPING_RIGHT}
+        
+        # 存储所有帧
+        self.all_frames = {}
+        
+        # 加载 idle GIF
+        self.movie = QMovie()
+        self.pet_label.setMovie(self.movie)
+        
+        idle_gif = os.path.join(GIF_DIR_FULL, 'idle1.gif')
+        if os.path.exists(idle_gif):
+            self.movie.setFileName(idle_gif)
+            self.movie.start()
+        
+        # 加载所有 idle GIF
+        for gif_name in GIF_FILES[PET_STATE_IDLE]:
+            gif_path = os.path.join(GIF_DIR_FULL, gif_name)
+            if os.path.exists(gif_path):
+                movie = QMovie(gif_path)
+                self.idle_movies.append((gif_name, movie))
+        
+        print(f"[LOAD] 加载了 {len(self.idle_movies)} 个 idle 动画")
+        
+        # 特殊处理：running-right.gif 前4帧用于移动，后面的帧用于 idle4
+        running_right_path = os.path.join(GIF_DIR_FULL, 'running-right.gif')
+        if os.path.exists(running_right_path):
+            try:
+                img = Image.open(running_right_path)
+                all_pil_frames = []
+                try:
+                    while True:
+                        frame = img.copy()
+                        all_pil_frames.append(frame)
+                        img.seek(img.tell() + 1)
+                except EOFError:
+                    pass
+                
+                # 前4帧用于移动
+                walking_pil_frames = all_pil_frames[:4]
+                # 后面的帧用于 idle4
+                idle4_pil_frames = all_pil_frames[4:] if len(all_pil_frames) > 4 else []
+                
+                # 加载移动帧（向右走不翻转）
+                walking_frames_right = []
+                for pil_frame in walking_pil_frames:
+                    frame = pil_frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                    frame = frame.convert('RGBA')
+                    data = frame.tobytes('raw', 'RGBA')
+                    qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
+                    walking_frames_right.append(QPixmap.fromImage(qimg))
+                
+                self.all_frames[PET_STATE_WALKING_RIGHT] = walking_frames_right
+                print(f"[LOAD] {PET_STATE_WALKING_RIGHT}: 前4帧 ({len(walking_frames_right)} 帧)")
+                
+                # 加载移动帧（向左走翻转）
+                walking_frames_left = []
+                for pil_frame in walking_pil_frames:
+                    frame = pil_frame.transpose(Image.FLIP_LEFT_RIGHT)
+                    frame = frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                    frame = frame.convert('RGBA')
+                    data = frame.tobytes('raw', 'RGBA')
+                    qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
+                    walking_frames_left.append(QPixmap.fromImage(qimg))
+                
+                self.all_frames[PET_STATE_WALKING_LEFT] = walking_frames_left
+                print(f"[LOAD] {PET_STATE_WALKING_LEFT}: 前4帧翻转 ({len(walking_frames_left)} 帧)")
+                
+                # 加载 idle4 帧
+                if idle4_pil_frames:
+                    idle4_frames = []
+                    for pil_frame in idle4_pil_frames:
+                        frame = pil_frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                        frame = frame.convert('RGBA')
+                        data = frame.tobytes('raw', 'RGBA')
+                        qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
+                        idle4_frames.append(QPixmap.fromImage(qimg))
+                    
+                    self.all_frames['idle4'] = idle4_frames
+                    # 添加到 idle_movies 用于随机切换
+                    self.idle_movies.append(('idle4.gif', idle4_frames))
+                    print(f"[LOAD] idle4: running-right.gif后{len(idle4_frames)}帧用于idle4")
+            except Exception as e:
+                print(f"[LOAD] 处理 running-right.gif 失败: {e}")
+        
+        # 加载其他状态的帧（支持翻转）
+        for state, gif_name in GIF_FILES.items():
+            if state == PET_STATE_IDLE:
+                continue
+            # 跳过已经处理的 walking 状态
+            if state in [PET_STATE_WALKING_LEFT, PET_STATE_WALKING_RIGHT]:
+                continue
+            
+            if isinstance(gif_name, list):
+                gif_name = gif_name[0] if gif_name else None
+            
+            if gif_name:
+                gif_path = os.path.join(GIF_DIR_FULL, gif_name)
+                if os.path.exists(gif_path):
+                    try:
+                        # 使用 PIL 加载 GIF
+                        img = Image.open(gif_path)
+                        frames = []
+                        
+                        try:
+                            while True:
+                                frame = img.copy()
+                                
+                                # 如果需要翻转
+                                if state in flip_states:
+                                    frame = frame.transpose(Image.FLIP_LEFT_RIGHT)
+                                
+                                # 调整大小
+                                frame = frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                                
+                                # 转换为 QPixmap
+                                if frame.mode == 'RGBA':
+                                    data = frame.tobytes('raw', 'RGBA')
+                                    qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
+                                else:
+                                    frame = frame.convert('RGBA')
+                                    data = frame.tobytes('raw', 'RGBA')
+                                    qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
+                                
+                                pixmap = QPixmap.fromImage(qimg)
+                                frames.append(pixmap)
+                                
+                                img.seek(img.tell() + 1)
+                        except EOFError:
+                            pass
+                        
+                        self.all_frames[state] = frames
+                        print(f"[LOAD] {state}: {gif_name} ({len(frames)} 帧, 翻转={state in flip_states})")
+                    except Exception as e:
+                        print(f"[LOAD] 加载失败: {gif_name}, 错误: {e}")
+        
+        # 创建帧动画定时器
+        self.frame_timer = QTimer(self)
+        self.frame_timer.timeout.connect(self._update_frame)
+        self.current_frame_index = 0
+    
+    def _update_frame(self):
+        """更新动画帧"""
+        # 检查是否是 idle4
+        if self.current_state == PET_STATE_IDLE and self.current_sub_index < len(self.idle_movies):
+            name, movie = self.idle_movies[self.current_sub_index]
+            if name == 'idle4.gif' and isinstance(movie, list):
+                self.current_frame_index = (self.current_frame_index + 1) % len(movie)
+                self.pet_label.setPixmap(movie[self.current_frame_index])
+                return
+        
+        # 其他状态使用 all_frames
+        if self.current_state in self.all_frames:
+            frames = self.all_frames[self.current_state]
+            if frames:
+                self.current_frame_index = (self.current_frame_index + 1) % len(frames)
+                self.pet_label.setPixmap(frames[self.current_frame_index])
+    
+    def _setup_timers(self):
+        """设置定时器"""
+        # 移动定时器
+        self.move_timer = QTimer(self)
+        self.move_timer.timeout.connect(self._on_move_timer)
+        self.move_timer.setInterval(50)
+        
+        # idle 切换定时器
+        self.idle_timer = QTimer(self)
+        self.idle_timer.timeout.connect(self._check_idle_switch)
+        self.idle_timer.setInterval(200)
+        self.idle_timer.start()
+        
+        # 等待动画定时器
+        self.waiting_timer = QTimer(self)
+        self.waiting_timer.timeout.connect(self._check_waiting)
+        self.waiting_timer.setInterval(10000)  # 每 10 秒检查一次
+        self.waiting_timer.start()
+        
+        # 抛物线动画定时器
+        self.parabola_timer = QTimer(self)
+        self.parabola_timer.timeout.connect(self._animate_parabola)
+    
+    def _set_state(self, state):
+        """设置宠物状态"""
+        if state == self.current_state and state != PET_STATE_IDLE:
+            return
+        
+        self.current_state = state
+        
+        # 切换到 idle 状态时停止移动
+        if state == PET_STATE_IDLE:
+            self.is_moving = False
+        
+        self._switch_animation(state)
+        
+        # idle 状态重置切换计时器
+        if state == PET_STATE_IDLE:
+            self.last_idle_switch_time = datetime.now()
+            self.idle_switch_count = 0
+    
+    def _switch_animation(self, state):
+        """切换动画"""
+        if state == PET_STATE_IDLE and self.idle_movies:
+            # idle 状态使用 QMovie 或帧动画
+            if self.current_sub_index < len(self.idle_movies):
+                name, movie = self.idle_movies[self.current_sub_index]
+                
+                # 检查是否是 idle4（帧动画而不是 QMovie）
+                if name == 'idle4.gif' and isinstance(movie, list):
+                    # idle4 使用帧动画
+                    self.movie.stop()
+                    self.frame_timer.start(100)
+                    self.current_frame_index = 0
+                    self.pet_label.setPixmap(movie[0])
+                    print(f"[ANIM] 切换到 idle4 (帧动画)")
+                else:
+                    # 其他 idle 使用 QMovie
+                    self.movie.stop()
+                    self.movie.setFileName(movie.fileName())
+                    self.movie.start()
+                    self.pet_label.setMovie(self.movie)
+                    self.frame_timer.stop()
+                    print(f"[ANIM] 切换到 idle: {name}")
+        elif state in self.all_frames:
+            # 其他状态使用帧动画
+            self.movie.stop()
+            self.frame_timer.start(100)  # 100ms 切换帧
+            self.current_frame_index = 0
+            frames = self.all_frames[state]
+            if frames:
+                self.pet_label.setPixmap(frames[0])
+                print(f"[ANIM] 切换到 {state}")
+        else:
+            # 没有帧，使用默认 idle
+            gif_name = GIF_FILES.get(state)
+            if isinstance(gif_name, list):
+                gif_name = gif_name[0] if gif_name else None
+            
+            if gif_name:
+                gif_path = os.path.join(GIF_DIR_FULL, gif_name)
+                if os.path.exists(gif_path):
+                    self.frame_timer.stop()
+                    self.movie.stop()
+                    self.movie.setFileName(gif_path)
+                    self.movie.start()
+                    self.pet_label.setMovie(self.movie)
+                    print(f"[ANIM] 切换到 {state}: {gif_name}")
+    
+    def _check_idle_switch(self):
+        """检查是否切换 idle 动画"""
+        if self.current_state != PET_STATE_IDLE or not self.idle_movies:
+            return
+        
+        # 检查时间间隔
+        now = datetime.now()
+        elapsed = (now - self.last_idle_switch_time).total_seconds() * 1000
+        
+        if elapsed < 7000:  # 7 秒间隔
+            return
+        
+        # 30% 概率切换
+        if random.random() < 0.3:
+            # 随机选择另一个 idle
+            new_index = random.randint(0, len(self.idle_movies) - 1)
+            if new_index != self.current_sub_index:
+                self.current_sub_index = new_index
+                self.last_idle_switch_time = now
+                
+                name, movie = self.idle_movies[self.current_sub_index]
+                
+                # 检查是否是 idle4（帧动画而不是 QMovie）
+                if name == 'idle4.gif' and isinstance(movie, list):
+                    # idle4 使用帧动画
+                    self.movie.stop()
+                    self.frame_timer.start(100)
+                    self.current_frame_index = 0
+                    self.pet_label.setPixmap(movie[0])
+                    print(f"[ANIM] 切换到 idle4 (帧动画)")
+                else:
+                    # 其他 idle 使用 QMovie
+                    self.frame_timer.stop()
+                    self.movie.stop()
+                    self.movie.setFileName(movie.fileName())
+                    self.movie.start()
+                    self.pet_label.setMovie(self.movie)
+                    print(f"[ANIM] 切换到 idle: {name}")
+    
+    def _check_waiting(self):
+        """检查是否显示等待动画"""
+        if self.current_state != PET_STATE_IDLE:
+            return
+        
+        # 检查无互动时间
+        now = datetime.now()
+        idle_time = (now - self.last_interaction_time).total_seconds()
+        
+        if idle_time >= 60 and random.random() < 0.4:
+            # 显示等待动画 5-7 秒
+            self._set_state(PET_STATE_WAITING)
+            
+            # 显示抱怨语句
+            if self.qi_yu_quotes.get('complaint'):
+                quote = random.choice(self.qi_yu_quotes['complaint'])
+                print(f"[WAITING] {quote}")
+                self._update_bubble(quote, PET_STATE_WAITING)
+            
+            waiting_duration = random.randint(5000, 7000)
+            QTimer.singleShot(waiting_duration, lambda: self._set_state(PET_STATE_IDLE))
+    
+    def _schedule_next_action(self):
+        """调度下一个动作"""
+        delay = random.randint(5000, 15000)  # 5-15秒后执行
+        QTimer.singleShot(delay, self._random_action)
+    
+    def _random_action(self):
+        """随机动作"""
+        # 如果正在移动或拖拽，不执行任何动作
+        if self.is_moving or self.is_dragging:
+            self._schedule_next_action()
+            return
+        
+        action = random.choice(['move', 'idle', 'jump'])
+        
+        if action == 'move':
+            self._start_random_walk()
+        elif action == 'jump':
+            self._jump()
+        elif action == 'idle':
+            self._set_state(PET_STATE_IDLE)
+        
+        self._schedule_next_action()
+    
+    def _start_random_walk(self):
+        """开始随机走动"""
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        
+        screen_geo = screen.geometry()
+        screen_width = screen_geo.width()
+        screen_height = screen_geo.height()
+        
+        # 随机选择目标位置
+        margin = 50
+        self.target_x = random.randint(margin, screen_width - self.pet_width - margin)
+        self.target_y = random.randint(margin, screen_height - self.pet_height - margin)
+        
+        # 设置方向并更新动画状态
+        if self.target_x > self.pet_x:
+            self.walk_direction = 1
+            self._set_state(PET_STATE_WALKING_RIGHT)
+        else:
+            self.walk_direction = -1
+            self._set_state(PET_STATE_WALKING_LEFT)
+        
+        # 开始移动
+        self.is_moving = True
+        self._move_step()
+    
+    def _move_step(self):
+        """移动一步"""
+        if not self.is_moving:
+            return
+        
+        dx = self.target_x - self.pet_x
+        dy = self.target_y - self.pet_y
+        
+        distance = (dx**2 + dy**2) ** 0.5
+        
+        if distance < 5:
+            # 到达目标
+            self.is_moving = False
+            self.pet_x = int(self.target_x)
+            self.pet_y = int(self.target_y)
+            self._clamp_position()
+            self.move(self.pet_x, self.pet_y)
+            self._set_state(PET_STATE_IDLE)
+            return
+        
+        # 移动
+        step = min(self.move_speed, distance)
+        ratio = step / distance
+        self.pet_x += dx * ratio
+        self.pet_y += dy * ratio
+        
+        # 限制在屏幕内
+        self._clamp_position()
+        
+        self.move(int(self.pet_x), int(self.pet_y))
+        
+        # 更新方向并切换动画
+        if dx > 0 and self.walk_direction != 1:
+            self.walk_direction = 1
+            self._set_state(PET_STATE_WALKING_RIGHT)
+        elif dx < 0 and self.walk_direction != -1:
+            self.walk_direction = -1
+            self._set_state(PET_STATE_WALKING_LEFT)
+        
+        # 继续移动
+        QTimer.singleShot(30, self._move_step)
+    
+    def _clamp_position(self):
+        """限制宠物位置在屏幕内"""
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geo = screen.geometry()
+            self.pet_x = int(max(0, min(self.pet_x, screen_geo.width() - self.pet_width)))
+            self.pet_y = int(max(0, min(self.pet_y, screen_geo.height() - self.pet_height)))
+    
+    def _init_qi_yu_quotes(self):
+        """初始化祁煜语录列表"""
+        self.qi_yu_quotes = {
+            'morning': [
+                '早啊，某位喜欢赖床的保镖小姐。',
+                '今天的阳光不错，适合画一幅关于你的画。',
+                '早饭吃了吗？没吃的话——我可不会给你做。',
+                '新的一天开始了，要不要一起去海边看日出？',
+                '昨晚睡得好吗？我可是画了一整夜的画。'
+            ],
+            'noon': [
+                '午饭时间到了，你打算吃什么？',
+                '要不要一起去吃烧烤？我知道一家不错的店。',
+                '午休时间，借你靠一会儿——就一小会儿。',
+                '今天中午的阳光太刺眼了，还是待在画室里比较舒服。',
+                '有人的肚子叫了哦，要不要我去给你买点吃的？'
+            ],
+            'afternoon': [
+                '下午好，我的灵感源泉。',
+                '要不要来画室看看我新画的作品？',
+                '今天下午的海风很舒服，想不想出去走走？',
+                '灵感突然来了，你能陪我一会儿吗？',
+                '下午茶时间，要不要来根奶酪棒？'
+            ],
+            'evening': [
+                '晚上好，宝宝。今天过得怎么样？',
+                '今晚的星星还没你上次打翻我颜料罐时瞪我的眼睛亮。',
+                '要不要一起去吃晚饭？我请客。',
+                '夜幕降临后，你似乎比白天时要坦率得多。',
+                '今天辛苦了，要不要靠在我肩上休息一会儿？',
+                '下班后打算去哪？你的专属司机随时待命。'
+            ],
+            'night': [
+                '这么早就说晚安可不是你的性格。',
+                '明天不是还要早起？别等到起晚了的时候再跟我抱怨。',
+                '夜晚的风有点冷……但也不如现在的气氛这么冷。',
+                '睡吧，我会守在你身边的。',
+                '晚安，我的宝贝。做个好梦。'
+            ],
+            'complaint': [
+                '等你等了八百年，水母都会走路了，海龟都会爬树了，连鲨鱼都改吃素了，你呢？',
+                '怎么才想起来找我，是什么把你的注意力吸引走了？',
+                '某人今天很忙嘛，消息都沉底了。',
+                '我等你等了好久，你终于想起我了？',
+                '今天画廊会有一幅名叫《消失的宝宝》的新展品，嫌疑人的特征与某人的日程高度吻合。',
+                '又不理我？看来我得画一幅《被遗忘的海神》了。',
+                '你再不来陪我，我就要把自己关在画室里三天三夜！',
+                '明明可以清楚地看看我，为什么还要效仿盲人摸象？',
+                '我挠挠挠......挠挠挠......',
+                '要人亲亲才能起来！',
+                '走了好久了，还不回来吗？'
+            ],
+            'casual': [
+                '最近天气凉了不少，是该多加些衣服了。',
+                '想吃冰淇淋吗？我去买。',
+                '折一个纸蜻蜓就能让你高兴这么久，你还真是好哄。',
+                '我的脸都被你戳红了，应该拿你怎么办呢？',
+                '要不要跟我去个地方？',
+                '你看起来不是很精神……是我的错觉，还是你没休息好？',
+                '除了触摸要不要换种感受方式？',
+                '好看吗，需不需要我再靠近一点？',
+                '这个世界上，没有比"独一无二"更珍贵的东西。',
+                '愿深海的祝福，与你同在。',
+                '喵喵喵~',
+                '嘿嘿，快来抱我。'
+            ]
+        }
+    
+    def _get_time_period(self):
+        """获取当前时间段"""
+        hour = datetime.now().hour
+        if 5 <= hour < 9:
+            return 'morning'
+        elif 9 <= hour < 12:
+            return 'morning'
+        elif 12 <= hour < 14:
+            return 'noon'
+        elif 14 <= hour < 19:
+            return 'afternoon'
+        elif 19 <= hour < 22:
+            return 'evening'
+        else:
+            return 'night'
+    
+    def _say_random_quote(self):
+        """随机说出一句祁煜语录"""
+        # 检查无互动时间
+        now = datetime.now()
+        idle_time = (now - self.last_interaction_time).total_seconds()
+        
+        # 选择语录类型
+        if idle_time >= 120:
+            quotes = self.qi_yu_quotes['complaint']
+            print(f"[QUOTE] 抱怨模式 (无互动 {idle_time:.1f}秒)")
+        else:
+            time_period = self._get_time_period()
+            quotes = self.qi_yu_quotes[time_period] + self.qi_yu_quotes['casual']
+            print(f"[QUOTE] 正常模式 ({time_period})")
+        
+        # 随机选择一句
+        quote = random.choice(quotes)
+        
+        # 显示气泡
+        print(f"[QUOTE] 祁煜: {quote}")
+        self._update_bubble(quote, PET_STATE_IDLE)
+        
+        # 设置气泡显示时间（5-7秒），然后继续调度下次说话
+        display_time = random.randint(5000, 7000)
+        
+        def hide_and_schedule():
+            self.bubble_window.hide()
+            if hasattr(self, '_update_bubble_position_timer'):
+                self._update_bubble_position_timer.stop()
+            self._schedule_say_quote()
+        
+        QTimer.singleShot(display_time, hide_and_schedule)
+    
+    def _schedule_say_quote(self):
+        """调度下次说话"""
+        delay = random.randint(8000, 30000)  # 8-30秒
+        QTimer.singleShot(delay, self._say_random_quote)
+    
+    def _greet_on_start(self):
+        """启动时打招呼"""
+        time_period = self._get_time_period()
+        greetings = {
+            'morning': ['早啊，某位喜欢赖床的保镖小姐。', '早安，我的宝贝。'],
+            'noon': ['午安，要一起吃饭吗？', '中午好，记得休息一下。'],
+            'afternoon': ['下午好，今天工作顺利吗？', '下午好，宝宝小姐。'],
+            'evening': ['晚上好，宝宝。今天过得怎么样？', '晚上好，想我了吗？'],
+            'night': ['晚安，我的缪斯小姐。', '这么早就说晚安可不是你的性格。']
+        }
+        quote = random.choice(greetings.get(time_period, ['你好，保镖小姐。']))
+        print(f"[GREET] {quote}")
+        self._update_bubble(quote, PET_STATE_IDLE)
+        
+        def hide_greet():
+            self.bubble_window.hide()
+            if hasattr(self, '_update_bubble_position_timer'):
+                self._update_bubble_position_timer.stop()
+        
+        QTimer.singleShot(5000, hide_greet)
+    
+    def _jump(self):
+        """跳跃动画 - 落到屏幕底部"""
+        # 如果正在移动或拖拽，不执行跳跃
+        if self.is_moving or self.is_dragging:
+            return
+        
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        
+        screen_geo = screen.geometry()
+        screen_height = screen_geo.height()
+        
+        print(f"[JUMP] 开始跳跃 from ({self.pet_x}, {self.pet_y}), direction={self.walk_direction}")
+        
+        # 跳跃参数
+        jump_distance = random.randint(100, 300)
+        jump_steps = random.randint(20, 40)
+        self._jump_step = 0
+        self._jump_start_x = self.pet_x
+        self._jump_start_y = self.pet_y
+        # 跳跃终点落到屏幕底部
+        self._jump_end_y = screen_height - self.pet_height
+        self.is_moving = True
+        
+        # 根据方向设置目标
+        if self.walk_direction > 0:
+            self._jump_target_x = self.pet_x + jump_distance
+            self._set_state(PET_STATE_JUMPING_RIGHT)
+        else:
+            self._jump_target_x = self.pet_x - jump_distance
+            self._set_state(PET_STATE_JUMPING_LEFT)
+        
+        # 执行跳跃动画
+        self._do_jump_step(jump_steps)
+    
+    def _do_jump_step(self, total_steps):
+        """执行跳跃的一步 - 落到屏幕底部"""
+        if self._jump_step >= total_steps:
+            # 跳跃结束，确保落到屏幕底部
+            self.pet_y = self._jump_end_y
+            self._clamp_position()
+            self.move(self.pet_x, self.pet_y)
+            self.is_moving = False
+            self._set_state(PET_STATE_IDLE)
+            return
+        
+        t = self._jump_step / total_steps
+        
+        # 计算 x 位置（线性移动）
+        x = self._jump_start_x + (self._jump_target_x - self._jump_start_x) * t
+        
+        # 计算 y 位置（抛物线落到屏幕底部）
+        # 抛物线方程：y = start_y + (end_y - start_y) * t^2
+        # 加上一个向上的抛物线：-jump_height * 4 * t * (1 - t)
+        jump_height = max(100, self._jump_start_y - self._jump_end_y) // 2
+        y = self._jump_start_y + (self._jump_end_y - self._jump_start_y) * (t * t) - jump_height * 4 * t * (1 - t)
+        
+        # 边界检查
+        self.pet_x = int(x)
+        self.pet_y = int(y)
+        self._clamp_position()
+        self.move(self.pet_x, self.pet_y)
+        
+        self._jump_step += 1
+        QTimer.singleShot(30, lambda: self._do_jump_step(total_steps))
+    
+    def _on_move_timer(self):
+        """移动定时器回调"""
+        if self.is_dragging or self.is_moving:
+            # 拖拽或移动中，不自动漂移
+            pass
+    
+    def _animate_parabola(self):
+        """抛物线动画"""
+        if not hasattr(self, 'parabola_data'):
+            self.parabola_timer.stop()
+            self.is_moving = False
+            return
+        
+        data = self.parabola_data
+        data['current_step'] += 1
+        
+        if data['current_step'] >= data['steps']:
+            # 动画结束
+            self.pet_x = int(data['end_x'])
+            self.pet_y = int(data['end_y'])
+            self.move(self.pet_x, self.pet_y)
+            self._set_state(PET_STATE_IDLE)
+            self.parabola_timer.stop()
+            self.is_moving = False  # 重置移动标志
+            return
+        
+        t = data['current_step'] / data['steps']
+        
+        # 计算位置
+        x = data['start_x'] + (data['end_x'] - data['start_x']) * t
+        y = data['start_y'] + (data['end_y'] - data['start_y']) * t + (1 - abs(2*t - 1)) * data['height_offset']
+        
+        # 边界检查
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geo = screen.geometry()
+            x = max(0, min(x, screen_geo.width() - self.pet_width))
+            y = max(0, min(y, screen_geo.height() - self.pet_height))
+        
+        self.pet_x = int(x)
+        self.pet_y = int(y)
+        self.move(self.pet_x, self.pet_y)
+        
+        # 更新动画状态（与原文件一致）
+        if t < 0.3:
+            state = PET_STATE_HAPPY
+        else:
+            state = PET_STATE_JUMPING_RIGHT if data['vx'] >= 0 else PET_STATE_JUMPING_LEFT
+        self._set_state(state)
+    
+    def _update_bubble(self, message, state=None):
+        """更新气泡消息"""
+        if state:
+            self._set_state(state)
+        
+        # 使用传入的 state 或当前状态
+        state_key = state if state else self.current_state
+        color = STATE_COLORS.get(state_key, "#F2F2F2")
+        
+        print(f"[BUBBLE] 消息: {message[:20]}... | 状态: {state_key} | 颜色: {color}")
+        
+        self.bubble_label.setStyleSheet(f"""
+            background-color: rgba(255, 255, 255, 0.9);
+            border: 4px solid {color};
+            border-radius: 15px;
+            padding: 10px 15px;
+            font-size: 24px;
+            color: #333333;
+            font-family: 'Microsoft YaHei UI', 'SimHei';
+        """)
+        self.bubble_label.setText(message)
+        self.bubble_label.adjustSize()
+        
+        # 获取气泡尺寸
+        label_width = self.bubble_label.width()
+        label_height = self.bubble_label.height()
+        
+        # 设置气泡窗口位置（宠物上方居中）
+        bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
+        bubble_y = int(self.pet_y) - label_height - 20
+        
+        # 边界检查
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geo = screen.geometry()
+            bubble_x = max(0, min(bubble_x, screen_geo.width() - label_width))
+            bubble_y = max(0, min(bubble_y, screen_geo.height() - label_height))
+        
+        self.bubble_window.setGeometry(bubble_x, bubble_y, label_width, label_height)
+        self.bubble_label.setGeometry(0, 0, label_width, label_height)
+        
+        self.bubble_window.show()
+        
+        # 移动时更新气泡位置
+        self._update_bubble_position_timer = QTimer(self)
+        self._update_bubble_position_timer.timeout.connect(self._update_bubble_position)
+        self._update_bubble_position_timer.start(50)
+    
+    def _update_bubble_position(self):
+        """更新气泡位置（跟随宠物）"""
+        if self.bubble_window.isVisible():
+            label_width = self.bubble_label.width()
+            label_height = self.bubble_label.height()
+            
+            bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
+            bubble_y = int(self.pet_y) - label_height - 20
+            
+            screen = QApplication.primaryScreen()
+            if screen:
+                screen_geo = screen.geometry()
+                bubble_x = max(0, min(bubble_x, screen_geo.width() - label_width))
+                bubble_y = max(0, min(bubble_y, screen_geo.height() - label_height))
+            
+            self.bubble_window.move(bubble_x, bubble_y)
+    
+    # ============== 鼠标事件 ==============
+    def mousePressEvent(self, event):
+        """鼠标按下事件"""
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.drag_start_x = event.globalX()
+            self.drag_start_y = event.globalY()
+            self.drag_last_x = event.globalX()
+            self.drag_last_y = event.globalY()
+            self.drag_last_time = datetime.now()
+            self.drag_velocity_x = 0
+            self.drag_velocity_y = 0
+            self.last_interaction_time = datetime.now()
+            
+            # 停止移动
+            self.is_moving = False
+            
+            # 停止悬停定时器
+            if hasattr(self, 'hover_timer') and self.hover_timer.isActive():
+                self.hover_timer.stop()
+            
+            # 点击时切换到 happy 状态
+            self._set_state(PET_STATE_HAPPY)
+            
+            # 取消抛物线动画
+            if self.parabola_timer.isActive():
+                self.parabola_timer.stop()
+            
+            # 设置抓取光标
+            self.setCursor(QCursor(Qt.ClosedHandCursor))
+    
+    def enterEvent(self, event):
+        """鼠标进入事件"""
+        self.setCursor(QCursor(Qt.OpenHandCursor))
+        
+        # 启动悬停定时器，3秒后弹出对话
+        self.hover_timer = QTimer(self)
+        self.hover_timer.timeout.connect(self._on_hover_timeout)
+        self.hover_timer.setSingleShot(True)
+        self.hover_timer.start(3000)
+    
+    def leaveEvent(self, event):
+        """鼠标离开事件"""
+        self.setCursor(QCursor(Qt.ArrowCursor))
+        
+        # 停止悬停定时器
+        if hasattr(self, 'hover_timer') and self.hover_timer.isActive():
+            self.hover_timer.stop()
+    
+    def _on_hover_timeout(self):
+        """悬停超时处理 - 弹出对话对话框"""
+        # 只有当鼠标仍在窗口内且没有拖拽时才弹出
+        if not self.is_dragging:
+            self._chat_with_pet()
+    
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件"""
+        if self.is_dragging:
+            # 计算速度
+            now = datetime.now()
+            dt = (now - self.drag_last_time).total_seconds()
+            if dt > 0:
+                self.drag_velocity_x = (event.globalX() - self.drag_last_x) / dt
+                self.drag_velocity_y = (event.globalY() - self.drag_last_y) / dt
+            
+            self.drag_last_x = event.globalX()
+            self.drag_last_y = event.globalY()
+            self.drag_last_time = now
+            
+            # 移动窗口（使用起始位置计算）
+            self.pet_x = self.pet_x + (event.globalX() - self.drag_start_x)
+            self.pet_y = self.pet_y + (event.globalY() - self.drag_start_y)
+            
+            # 边界检查
+            screen = QApplication.primaryScreen()
+            if screen:
+                screen_geo = screen.geometry()
+                self.pet_x = max(0, min(self.pet_x, screen_geo.width() - self.pet_width))
+                self.pet_y = max(0, min(self.pet_y, screen_geo.height() - self.pet_height))
+            
+            self.move(int(self.pet_x), int(self.pet_y))
+            
+            # 更新起始位置
+            self.drag_start_x = event.globalX()
+            self.drag_start_y = event.globalY()
+    
+    def mouseReleaseEvent(self, event):
+        """鼠标释放事件"""
+        if event.button() == Qt.LeftButton and self.is_dragging:
+            self.is_dragging = False
+            self.setCursor(QCursor(Qt.OpenHandCursor))
+            
+            # 检查速度，决定是否执行抛物线
+            speed = (self.drag_velocity_x ** 2 + self.drag_velocity_y ** 2) ** 0.5
+            if speed > 50:
+                self._start_parabola()
+            else:
+                self._set_state(PET_STATE_IDLE)
+    
+    def _start_parabola(self):
+        """开始抛物线动画"""
+        self.is_moving = True  # 设置移动标志
+        
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        
+        screen_geo = screen.geometry()
+        
+        # 计算目标位置
+        vx = self.drag_velocity_x * 0.3
+        
+        target_x = self.pet_x + vx
+        target_y = screen_geo.height() - self.pet_height - 20
+        
+        # 边界检查
+        target_x = max(0, min(target_x, screen_geo.width() - self.pet_width))
+        target_y = max(0, min(target_y, screen_geo.height() - self.pet_height))
+        
+        # 抛物线参数 - 限制高度偏移，确保不会超出屏幕顶部
+        max_height = min(abs(vx) * 0.3, self.pet_y - 50) if self.pet_y > 50 else 0
+        height_offset = -max_height if abs(vx) > 50 else -min(50, self.pet_y - 50) if self.pet_y > 50 else 0
+        
+        self.parabola_data = {
+            'start_x': self.pet_x,
+            'start_y': self.pet_y,
+            'end_x': target_x,
+            'end_y': target_y,
+            'vx': vx,
+            'height_offset': height_offset,
+            'current_step': 0,
+            'steps': 30
+        }
+        
+        self.parabola_timer.start(30)
+    
+    def mouseDoubleClickEvent(self, event):
+        """双击事件 - 显示代码检查器"""
+        if event.button() == Qt.LeftButton:
+            self._show_code_checker()
+    
+    def contextMenuEvent(self, event):
+        """右键菜单 - 美化样式"""
+        menu = QMenu(self)
+        
+        # 设置菜单样式 - 圆角、半透明
+        # 关键：设置透明背景属性
+        menu.setAttribute(Qt.WA_TranslucentBackground)
+        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: rgba(255, 255, 255, 200);
+                border: 2px solid rgba(210, 162, 152, 150);
+                border-radius: 12px;
+                padding: 8px 5px;
+            }
+            QMenu::item {
+                background-color: transparent;
+                padding: 8px 25px 8px 15px;
+                border-radius: 8px;
+                margin: 2px 5px;
+                font-size: 22px;
+                color: #333333;
+            }
+            QMenu::item:selected {
+                background-color: rgba(210, 162, 152, 180); 
+                color: #2E7D32;
+            }
+            QMenu::item:disabled {
+                color: #888888;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: rgba(200, 200, 200, 200);
+                margin: 5px 15px;
+            }
+        """)
+        
+        # 菜单项
+        menu.addAction(f"🐛 {APP_NAME} v{VERSION}").setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("💬 和我对话", self._chat_with_pet)
+        menu.addAction("🔍 检查代码", self._show_code_checker)
+        menu.addAction("📁 打开文件", self._open_file)
+        menu.addSeparator()
+        menu.addAction("⚙ 设置", self._show_settings)
+        menu.addAction("💡 关于", self._show_about)
+        menu.addSeparator()
+        menu.addAction("❌ 退出", self._quit_app)
+        
+        menu.exec_(event.globalPos())
+    
+    # ============== 功能方法 ==============
+    def _show_code_checker(self, code_content=None):
+        """显示代码检查器"""
+        self._update_bubble("正在分析代码...", PET_STATE_THINKING)
+        
+        dialog = CodeCheckerDialog(self, code_content)
+        dialog.exec_()
+    
+    def _open_file(self):
+        """打开文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开代码文件",
+            "",
+            "Python Files (*.py);;JavaScript Files (*.js);;All Files (*)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                self._update_bubble(f"📂 已加载: {os.path.basename(file_path)}", PET_STATE_HAPPY)
+                # 打开代码检查器并填入代码
+                self._show_code_checker(content)
+            except Exception as e:
+                self._update_bubble(f"❌ 无法打开文件", PET_STATE_SAD)
+    
+    def _show_settings(self):
+        """显示设置对话框"""
+        dialog = SettingsDialog(self)
+        dialog.exec_()
+        self._set_state(PET_STATE_HAPPY)
+    
+    def _chat_with_pet(self):
+        """与宠物对话"""
+        dialog = ChatDialog(self)
+        dialog.exec_()
+    
+    def _show_about(self):
+        """显示关于对话框"""
+        QMessageBox.about(
+            self,
+            f"关于 {APP_NAME}",
+            f"<h3>🐛 {APP_NAME}</h3>"
+            f"<p>版本: {VERSION}</p>"
+            f"<p>一个可爱的编程助手，能检测代码错误并给出修复建议</p>"
+            f"<p>使用 PyQt5 开发，解决透明背景问题</p>"
+        )
+    
+    def _quit_app(self):
+        """退出应用"""
+        QApplication.quit()
+
+
+# ============== 代码检查器对话框 ==============
+class CodeCheckerDialog(QDialog):
+    """代码检查器对话框 - 马卡龙风格"""
+    
+    def __init__(self, parent=None, code_content=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("🐛 Debug Pet - 代码检查器")
+        self.setGeometry(200, 200, 700, 650)
+        self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
+        
+        # 设置窗口整体透明度（半透明效果）border: 2px solid #98D8C8;
+        self.setWindowOpacity(0.92)
+        
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #FFF8DC;
+                border-radius: 15px;
+            }
+        """)
+        
+        # 加载设置
+        self._load_settings()
+        
+        self._init_ui()
+        
+        # 如果有代码内容，填入
+        if code_content:
+            self.code_text.setPlainText(code_content)
+    
+    def _load_settings(self):
+        """加载设置"""
+        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        self.api_url = os.environ.get("API_URL", "https://api.deepseek.com/chat/completions")
+        self.ai_service = os.environ.get("AI_SERVICE", "deepseek")
+        
+        # 从文件加载（使用当前工作目录，方便用户修改）
+        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
+        try:
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('DEEPSEEK_API_KEY='):
+                            self.api_key = line.split('=', 1)[1]
+                        elif line.startswith('GLM_API_KEY='):
+                            self.api_key = line.split('=', 1)[1]
+                        elif line.startswith('API_URL='):
+                            self.api_url = line.split('=', 1)[1]
+                        elif line.startswith('USE_AI='):
+                            self.use_ai = line.split('=', 1)[1].lower() == 'true'
+                        elif line.startswith('AI_SERVICE='):
+                            self.ai_service = line.split('=', 1)[1]
+        except:
+            pass
+        
+        # 默认值
+        if not hasattr(self, 'use_ai'):
+            self.use_ai = False
+        
+        # 默认服务
+        if not hasattr(self, 'ai_service'):
+            self.ai_service = "deepseek"
+        
+        # 根据 AI 服务自动设置 API URL
+        if self.ai_service == "glm":
+            self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        else:
+            self.api_url = "https://api.deepseek.com/chat/completions"
+    
+    def _init_ui(self):
+        """初始化 UI - 马卡龙风格"""
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 标题区域
+        title_frame = QFrame()
+        title_frame.setStyleSheet("background-color: transparent;")
+        title_layout = QHBoxLayout(title_frame)
+        
+        title = QLabel("🐛 Debug Pet")
+        title.setStyleSheet("""
+            font-size: 24px;
+            font-weight: bold;
+            color: #5D5D5D;
+            background-color: transparent;
+        """)
+        title_layout.addWidget(title)
+        title_layout.addStretch()
+        
+        layout.addWidget(title_frame)
+        
+        # 代码输入区域
+        code_label = QLabel("📋 代码输入")
+        code_label.setStyleSheet("""
+            font-size: 22px;
+            font-weight: bold;
+            color: #666666;
+            background-color: transparent;
+        """)
+        layout.addWidget(code_label)
+        
+        self.code_text = QTextEdit()
+        self.code_text.setPlaceholderText("在此粘贴或输入代码...")
+        self.code_text.setMinimumHeight(200)
+        self.code_text.setStyleSheet("""
+            QTextEdit {
+                background-color: white;
+                border: 2px solid #E0E0E0;
+                border-radius: 10px;
+                padding: 15px;
+                font-family: 'Consolas', 'Microsoft YaHei UI';
+                font-size: 18px;
+                color: #333333;
+            }
+            QTextEdit:focus {
+                border: 2px solid #98D8C8;
+            }
+        """)
+        layout.addWidget(self.code_text, 2)
+        
+        # 按钮区域 - 马卡龙配色圆角按钮
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet("background-color: transparent;")
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setSpacing(10)
+        
+        # 检查代码按钮 - 薄荷绿
+        self.check_btn = QPushButton("🔍 检查代码")
+        self.check_btn.setMinimumSize(120, 40)
+        self.check_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #98D8C8;
+                color: #2E7D32;
+                border: none;
+                border-radius: 12px;
+                padding: 10px 20px;
+                font-size: 22px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7BC5B3;
+            }
+            QPushButton:pressed {
+                background-color: #68B4A1;
+            }
+        """)
+        self.check_btn.clicked.connect(self._check_code)
+        btn_layout.addWidget(self.check_btn)
+        
+        # 打开文件按钮 - 天蓝色
+        open_btn = QPushButton("📁 打开文件")
+        open_btn.setMinimumSize(120, 40)
+        open_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #87CEEB;
+                color: #1565C0;
+                border: none;
+                border-radius: 12px;
+                padding: 10px 20px;
+                font-size: 22px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #6BB3D9;
+            }
+            QPushButton:pressed {
+                background-color: #5A9FC7;
+            }
+        """)
+        open_btn.clicked.connect(self._open_file_in_dialog)
+        btn_layout.addWidget(open_btn)
+        
+        # 清空按钮 - 蜜桃色
+        clear_btn = QPushButton("🗑 清空")
+        clear_btn.setMinimumSize(100, 40)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFDAB9;
+                color: #C62828;
+                border: none;
+                border-radius: 12px;
+                padding: 10px 20px;
+                font-size: 22px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #FFC7A3;
+            }
+            QPushButton:pressed {
+                background-color: #FFB48A;
+            }
+        """)
+        clear_btn.clicked.connect(self._clear_all)
+        btn_layout.addWidget(clear_btn)
+        
+        btn_layout.addStretch()
+        
+        layout.addWidget(btn_frame)
+        
+        # 错误输出区域
+        error_label = QLabel("❌ 错误列表")
+        error_label.setStyleSheet("""
+            font-size: 22px;
+            font-weight: bold;
+            color: #666666;
+            background-color: transparent;
+        """)
+        layout.addWidget(error_label)
+        
+        self.error_text = QTextEdit()
+        self.error_text.setReadOnly(True)
+        self.error_text.setMinimumHeight(150)
+        self.error_text.setStyleSheet("""
+            QTextEdit {
+                background-color: white;
+                border: 2px solid #E0E0E0;
+                border-radius: 10px;
+                padding: 15px;
+                font-family: 'Consolas', 'Microsoft YaHei UI';
+                font-size: 18px;
+                color: #E57373;
+            }
+        """)
+        layout.addWidget(self.error_text, 1)
+        
+        self.setLayout(layout)
+    
+    def _open_file_in_dialog(self):
+        """在对话框中打开文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开代码文件",
+            "",
+            "Python Files (*.py);;JavaScript Files (*.js);;All Files (*)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                self.code_text.setPlainText(content)
+            except Exception as e:
+                self.error_text.setText(f"❌ 无法打开文件: {e}")
+    
+    def _clear_all(self):
+        """清空所有内容"""
+        self.code_text.clear()
+        self.error_text.clear()
+    
+    def _check_code(self):
+        """检查代码"""
+        code = self.code_text.toPlainText()
+        if not code.strip():
+            self.error_text.setText("⚠️ 请输入代码！")
+            return
+        
+        # 如果启用了 AI 且有 API Key，使用 AI 检测
+        if self.use_ai and self.api_key and requests:
+            self.error_text.setText("🤖 正在使用 AI 分析代码...")
+            self._check_with_ai(code)
+        else:
+            # 使用简单的语法检查
+            errors = self._check_python(code)
+            
+            if errors:
+                error_output = "🐛 发现以下错误:\n\n"
+                for i, err in enumerate(errors, 1):
+                    error_output += f"{i}. 第 {err['line']} 行: {err['message']}\n"
+                self.error_text.setText(error_output)
+                # 报错时显示 failed 动作，停止移动
+                if self.parent_window:
+                    self.parent_window.is_moving = False
+                    self.parent_window._update_bubble("发现错误！", PET_STATE_SAD)
+            else:
+                self.error_text.setText("✅ 代码检查通过！没有发现语法错误。")
+                # 通过时显示 idle4 动作，停止移动
+                if self.parent_window:
+                    self.parent_window.is_moving = False
+                    self.parent_window._set_state('idle4')
+    
+    def _check_with_ai(self, code):
+        """使用 AI 检测代码 - 支持 DeepSeek 和 GLM"""
+        if not requests:
+            self.error_text.setText("⚠️ 未安装 requests 库，无法使用 AI 检测。\n请运行: pip install requests")
+            return
+        
+        try:
+            # 根据服务类型设置参数
+            if self.ai_service == "glm":
+                # GLM-4.7-Flash 设置
+                api_url = self.api_url if self.api_url else "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                model = "glm-4-flash"
+                headers = {
+                    "Content-Type": "application/json",
+                }
+                # GLM 需要 API Key
+                if self.api_key:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+            else:
+                # DeepSeek 设置
+                api_url = self.api_url if self.api_url else "https://api.deepseek.com/chat/completions"
+                model = "deepseek-chat"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+            
+            prompt = f"""请分析以下代码，找出其中的错误、bug 或潜在问题。请用中文回答。
+
+代码：
+```python
+{code}
+```
+
+请按照以下格式回答：
+如果代码有问题，列出具体的问题和建议。
+如果代码没有问题，请明确说明"代码没有问题"。
+"""
+            
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "你是一个专业的代码审查专家，擅长发现代码中的错误和潜在问题。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3
+            }
+            
+            response = requests.post(api_url, headers=headers, json=data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                ai_message = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                # 判断 AI 是否认为代码有问题
+                if "没有问题" in ai_message or "代码正确" in ai_message or "代码没有错误" in ai_message:
+                    self.error_text.setText("✅ AI 检测通过！\n\n" + ai_message)
+                    # 通过时显示 idle4 动作，停止移动
+                    if self.parent_window:
+                        self.parent_window.is_moving = False
+                        self.parent_window._set_state('idle4')
+                else:
+                    self.error_text.setText("🐛 AI 发现问题：\n\n" + ai_message)
+                    # 报错时显示 failed 动作，停止移动
+                    if self.parent_window:
+                        self.parent_window.is_moving = False
+                        self.parent_window._update_bubble("发现错误！", PET_STATE_SAD)
+            else:
+                error_msg = f"⚠️ API 请求失败 (状态码: {response.status_code})\n\n{response.text}"
+                self.error_text.setText(error_msg)
+        except requests.exceptions.Timeout:
+            self.error_text.setText("⚠️ API 请求超时，请检查网络连接。")
+        except Exception as e:
+            self.error_text.setText(f"⚠️ AI 检测失败: {str(e)}")
+    
+    def _check_python(self, code):
+        """使用 py_compile 检查 Python 代码"""
+        errors = []
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            f.write(code)
+            temp_file = f.name
+        
+        try:
+            result = subprocess.run(
+                ['python', '-m', 'py_compile', temp_file],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            if result.returncode != 0:
+                for line in result.stderr.split('\n'):
+                    match = re.search(r'line (\d+)', line)
+                    if match:
+                        errors.append({
+                            'line': int(match.group(1)),
+                            'message': line.strip()
+                        })
+        except FileNotFoundError:
+            errors.append({
+                'line': 1,
+                'message': 'Python 编译器未找到，请安装 Python3'
+            })
+        finally:
+            os.unlink(temp_file)
+        
+        return errors
+
+
+# ============== 设置对话框 ==============
+class SettingsDialog(QDialog):
+    """设置对话框"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("⚙ 设置")
+        self.setGeometry(300, 300, 400, 350)
+        self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
+        
+        # 设置窗口整体透明度（半透明效果）
+        self.setWindowOpacity(0.92)
+        
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2D2D2D;
+                border: 2px solid #98D8C8;
+                border-radius: 15px;
+            }
+        """)
+        
+        # 加载现有设置
+        self._load_settings()
+        
+        self._init_ui()
+    
+    def _load_settings(self):
+        """加载设置"""
+        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        self.api_url = os.environ.get("API_URL", "https://api.deepseek.com/chat/completions")
+        self.ai_service = os.environ.get("AI_SERVICE", "deepseek")
+        
+        # 从文件加载（使用当前工作目录，方便用户修改）
+        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
+        try:
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('DEEPSEEK_API_KEY='):
+                            self.api_key = line.split('=', 1)[1]
+                        elif line.startswith('GLM_API_KEY='):
+                            self.api_key = line.split('=', 1)[1]
+                        elif line.startswith('API_URL='):
+                            self.api_url = line.split('=', 1)[1]
+                        elif line.startswith('USE_AI='):
+                            self.use_ai = line.split('=', 1)[1].lower() == 'true'
+                        elif line.startswith('AI_SERVICE='):
+                            self.ai_service = line.split('=', 1)[1]
+        except:
+            pass
+        
+        # 默认值
+        if not hasattr(self, 'use_ai'):
+            self.use_ai = False
+        
+        # 默认服务
+        if not hasattr(self, 'ai_service'):
+            self.ai_service = "deepseek"
+        
+        # 根据 AI 服务自动设置 API URL
+        if self.ai_service == "glm":
+            self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        else:
+            self.api_url = "https://api.deepseek.com/chat/completions"
+    
+    def _init_ui(self):
+        """初始化 UI"""
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 25, 25, 25)
+        
+        # 标题区域
+        title_frame = QFrame()
+        title_frame.setStyleSheet("background-color: transparent;")
+        title_layout = QHBoxLayout(title_frame)
+        
+        title = QLabel("⚙ 设置")
+        title.setStyleSheet("""
+            font-size: 22px;
+            font-weight: bold;
+            color: #FFFFFF;
+            background-color: transparent;
+        """)
+        title_layout.addWidget(title)
+        title_layout.addStretch()
+        
+        layout.addWidget(title_frame)
+        
+        # API 设置区域
+        api_label = QLabel("🔧 API 设置")
+        api_label.setStyleSheet("""
+            font-size: 20px;
+            font-weight: bold;
+            color: #98D8C8;
+            background-color: transparent;
+        """)
+        layout.addWidget(api_label)
+        
+        # AI 服务选择
+        service_layout = QHBoxLayout()
+        service_label = QLabel("AI 服务:")
+        service_label.setStyleSheet("color: #CCCCCC; background-color: transparent;")
+        service_layout.addWidget(service_label)
+        
+        self.service_combo = QComboBox()
+        self.service_combo.addItems(["DeepSeek", "GLM-4.7-Flash"])
+        self.service_combo.setCurrentText("DeepSeek" if self.ai_service == "deepseek" else "GLM-4.7-Flash")
+        self.service_combo.setStyleSheet("""
+            QComboBox {
+                background-color: rgba(60, 60, 60, 200);
+                border: 1px solid rgba(100, 100, 100, 150);
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #FFFFFF;
+                font-size: 20px;
+                min-width: 150px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: rgba(60, 60, 60, 200);
+                border: 1px solid rgba(100, 100, 100, 150);
+                border-radius: 8px;
+                color: #FFFFFF;
+                font-size: 20px;
+            }
+        """)
+        # 当选择改变时，自动更新 API URL
+        self.service_combo.currentTextChanged.connect(self._on_service_changed)
+        service_layout.addWidget(self.service_combo)
+        layout.addLayout(service_layout)
+        
+        # API Key
+        api_key_layout = QHBoxLayout()
+        api_key_label = QLabel("API Key:")
+        api_key_label.setStyleSheet("color: #CCCCCC; background-color: transparent;")
+        api_key_layout.addWidget(api_key_label)
+        
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("输入 API Key (GLM 无需 Key)")
+        self.api_key_input.setStyleSheet("""
+            background-color: rgba(60, 60, 60, 200);
+            border: 1px solid rgba(100, 100, 100, 150);
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: #FFFFFF;
+            font-size: 20px;
+        """)
+        self.api_key_input.setText(self.api_key)
+        api_key_layout.addWidget(self.api_key_input)
+        layout.addLayout(api_key_layout)
+        
+        # API URL
+        api_url_layout = QHBoxLayout()
+        api_url_label = QLabel("API URL:")
+        api_url_label.setStyleSheet("color: #CCCCCC; background-color: transparent;")
+        api_url_layout.addWidget(api_url_label)
+        
+        self.api_url_input = QLineEdit()
+        self.api_url_input.setPlaceholderText("API 端点 URL")
+        self.api_url_input.setStyleSheet("""
+            background-color: rgba(60, 60, 60, 200);
+            border: 1px solid rgba(100, 100, 100, 150);
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: #FFFFFF;
+            font-size: 20px;
+        """)
+        self.api_url_input.setText(self.api_url)
+        api_url_layout.addWidget(self.api_url_input)
+        layout.addLayout(api_url_layout)
+        
+        # 使用 AI 开关
+        self.use_ai_checkbox = QPushButton("🤖 启用 AI 分析")
+        self.use_ai_checkbox.setCheckable(True)
+        self.use_ai_checkbox.setChecked(self.use_ai)
+        self.use_ai_checkbox.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(60, 60, 60, 200);
+                border: 1px solid rgba(100, 100, 100, 150);
+                border-radius: 8px;
+                padding: 10px 15px;
+                color: #FFFFFF;
+                font-size: 20px;
+                text-align: left;
+            }
+            QPushButton:checked {
+                background-color: rgba(152, 216, 200, 180);
+                color: #2E7D32;
+            }
+        """)
+        layout.addWidget(self.use_ai_checkbox)
+        
+        layout.addStretch()
+        
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(15)
+        
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setMinimumSize(100, 40)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(80, 80, 80, 200);
+                color: #FFFFFF;
+                border: none;
+                border-radius: 10px;
+                padding: 10px 20px;
+                font-size: 20px;
+            }
+            QPushButton:hover {
+                background-color: rgba(100, 100, 100, 200);
+            }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        save_btn = QPushButton("保存")
+        save_btn.setMinimumSize(100, 40)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #98D8C8;
+                color: #2E7D32;
+                border: none;
+                border-radius: 10px;
+                padding: 10px 20px;
+                font-size: 20px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7BC5B3;
+            }
+        """)
+        save_btn.clicked.connect(self._save_settings)
+        btn_layout.addWidget(save_btn)
+        
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+    
+    def _on_service_changed(self, service_name):
+        """当 AI 服务改变时，自动更新 API URL"""
+        if service_name == "DeepSeek":
+            self.api_url_input.setText("https://api.deepseek.com/chat/completions")
+        elif service_name == "GLM-4.7-Flash":
+            self.api_url_input.setText("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    
+    def _save_settings(self):
+        """保存设置"""
+        # 保存到环境变量
+        os.environ["DEEPSEEK_API_KEY"] = self.api_key_input.text()
+        os.environ["API_URL"] = self.api_url_input.text()
+        os.environ["AI_SERVICE"] = "deepseek" if self.service_combo.currentText() == "DeepSeek" else "glm"
+        
+        # 保存到文件（保存到当前工作目录，方便用户修改）
+        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
+        try:
+            with open(settings_file, 'w', encoding='utf-8') as f:
+                f.write(f"# Debug Pet 配置文件\n\n")
+                f.write(f"# 启用 AI 代码分析功能\n")
+                f.write(f"USE_AI={self.use_ai_checkbox.isChecked()}\n\n")
+                f.write(f"# AI 服务选择: deepseek 或 glm\n")
+                f.write(f"AI_SERVICE={'deepseek' if self.service_combo.currentText() == 'DeepSeek' else 'glm'}\n\n")
+                
+                # 根据选择的服务保存对应的 API Key
+                if self.service_combo.currentText() == "DeepSeek":
+                    f.write(f"# DeepSeek API 密钥\n")
+                    f.write(f"DEEPSEEK_API_KEY={self.api_key_input.text()}\n")
+                else:
+                    f.write(f"# GLM API 密钥\n")
+                    f.write(f"GLM_API_KEY={self.api_key_input.text()}\n")
+                
+                f.write(f"\n# 自定义 API 地址\n")
+                f.write(f"API_URL={self.api_url_input.text()}\n")
+        except:
+            pass
+        
+        self.accept()
+
+
+# ============== 对话对话框 ==============
+class ChatDialog(QDialog):
+    """与宠物对话的对话框 - 使用 GLM 以祁煜语气回复"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        
+        # 加载设置
+        self._load_settings()
+        
+        # 对话历史（用于上下文记忆）
+        self.message_history = []
+        
+        self.setWindowTitle("💬 和我对话")
+        self.setGeometry(300, 300, 550, 450)
+        self.setWindowOpacity(0.92)
+        
+        self._init_ui()
+    
+    def _load_settings(self):
+        """加载设置"""
+        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        self.api_url = os.environ.get("API_URL", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+        self.ai_service = os.environ.get("AI_SERVICE", "glm")
+        
+        # 从当前工作目录加载（支持打包后运行）
+        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
+        try:
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('DEEPSEEK_API_KEY='):
+                            self.api_key = line.split('=', 1)[1]
+                        elif line.startswith('GLM_API_KEY='):
+                            self.api_key = line.split('=', 1)[1]
+                        elif line.startswith('API_URL='):
+                            self.api_url = line.split('=', 1)[1]
+                        elif line.startswith('USE_AI='):
+                            self.use_ai = line.split('=', 1)[1].lower() == 'true'
+                        elif line.startswith('AI_SERVICE='):
+                            self.ai_service = line.split('=', 1)[1]
+        except:
+            pass
+        
+        if not hasattr(self, 'ai_service'):
+            self.ai_service = "glm"
+        
+        # 根据 AI 服务自动设置 API URL
+        if self.ai_service == "glm":
+            self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        else:
+            self.api_url = "https://api.deepseek.com/chat/completions"
+    
+    def _init_ui(self):
+        """初始化 UI"""
+        layout = QVBoxLayout()
+        
+        # 标题
+        title = QLabel("💬 想对我说...")
+        title.setStyleSheet("""
+            font-size: 22px;
+            font-weight: bold;
+            color: #5D5D5D;
+            background-color: transparent;
+        """)
+        layout.addWidget(title)
+        
+        # 对话历史区域
+        self.chat_history = QTextEdit()
+        self.chat_history.setReadOnly(True)
+        self.chat_history.setMinimumHeight(200)
+        self.chat_history.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(255, 250, 240, 200);
+                border: 2px solid #E0E0E0;
+                border-radius: 10px;
+                padding: 10px;
+                font-family: 'Microsoft YaHei UI', 'SimHei';
+                font-size: 20px;
+                color: #333333;
+            }
+        """)
+        self.chat_history.append("<span style='color:#5D4037;'>祁煜:</span> 你来了，我一直在等你...")
+        layout.addWidget(self.chat_history, 2)
+        
+        # 输入区域
+        input_layout = QHBoxLayout()
+        
+        self.input_text = QLineEdit()
+        self.input_text.setPlaceholderText("输入你想说的话...")
+        self.input_text.setStyleSheet("""
+            QLineEdit {
+                background-color: white;
+                border: 2px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 10px 15px;
+                font-family: 'Microsoft YaHei UI', 'SimHei';
+                font-size: 20px;
+                color: #333333;
+            }
+            QLineEdit:focus {
+                border: 2px solid #98D8C8;
+            }
+        """)
+        self.input_text.returnPressed.connect(self._send_message)
+        input_layout.addWidget(self.input_text)
+        
+        send_btn = QPushButton("发送")
+        send_btn.setMinimumSize(80, 40)
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #98D8C8;
+                color: #2E7D32;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 15px;
+                font-size: 20px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7BC5B3;
+            }
+            QPushButton:pressed {
+                background-color: #6AB4A2;
+            }
+            QPushButton:disabled {
+                background-color: #C0C0C0;
+                color: #808080;
+            }
+        """)
+        send_btn.clicked.connect(self._send_message)
+        self.send_btn = send_btn
+        input_layout.addWidget(send_btn)
+        
+        layout.addLayout(input_layout)
+        
+        self.setLayout(layout)
+    
+    def _send_message(self):
+        """发送消息"""
+        message = self.input_text.text().strip()
+        if not message:
+            return
+        
+        # 添加用户消息到历史
+        self.chat_history.append(f"<span style='color:#1565C0;'>你:</span> {message}")
+        self.input_text.clear()
+        self.send_btn.setEnabled(False)
+        
+        # 添加到上下文历史
+        self.message_history.append({"role": "user", "content": message})
+        
+        # 使用 GLM 以祁煜语气回复（带上下文）
+        self._get_qi_yu_response(message)
+    
+    def _load_qi_yu_prompt(self):
+        """从 yu.md 文件加载祁煜 prompt"""
+        prompt_path = get_resource_path("yu.md")
+        if os.path.exists(prompt_path):
+            try:
+                with open(prompt_path, 'r', encoding='utf-8') as f:
+                    return f.read() + "\n\n请遵守核心任务与对话规范，符合祁煜人物设定，参考对话风格与语气，参考祁煜语录汇总。用祁煜的口吻回复以下对话："
+            except Exception:
+                pass
+        return None
+    
+    def _get_qi_yu_response(self, message):
+        """获取祁煜风格的回复"""
+        if not requests:
+            self.chat_history.append("<span style='color:#D32F2F;'>祁煜:</span> 抱歉，我现在无法回应...")
+            self.send_btn.setEnabled(True)
+            return
+        
+        try:
+            # 使用配置的 API
+            api_url = self.api_url if self.api_url else "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+            model = "deepseek-chat" if self.ai_service == "deepseek" else "glm-4-flash"
+            
+            headers = {
+                "Content-Type": "application/json",
+            }
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            
+            qi_yu_prompt = self._load_qi_yu_prompt()
+            if not qi_yu_prompt:
+                self.chat_history.append("<span style='color:#D32F2F;'>祁煜:</span> 我的剧本好像丢了...")
+                self.send_btn.setEnabled(True)
+                return
+            
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": qi_yu_prompt}
+                ] + self.message_history[-20:] + [
+                    {"role": "user", "content": message}
+                ],
+                "temperature": 0.7
+            }
+            
+            response = requests.post(api_url, headers=headers, json=data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                # 添加回复到历史
+                self.chat_history.append(f"<span style='color:#5D4037;'>祁煜:</span> {reply}")
+                
+                # 添加到上下文历史
+                self.message_history.append({"role": "assistant", "content": reply})
+                
+                # 更新宠物状态
+                if self.parent_window:
+                    self.parent_window._set_state(PET_STATE_HAPPY)
+            else:
+                self.chat_history.append(f"<span style='color:#D32F2F;'>祁煜:</span> 信号不太好，我听不清楚...")
+        except requests.exceptions.Timeout:
+            self.chat_history.append("<span style='color:#D32F2F;'>祁煜:</span> 深海信号延迟了，稍后再试...")
+        except Exception as e:
+            self.chat_history.append(f"<span style='color:#D32F2F;'>祁煜:</span> 抱歉，我现在无法回应...")
+        
+        self.send_btn.setEnabled(True)
+
+
+# ============== 主程序 ==============
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    
+    # 设置应用样式
+    app.setStyle('Fusion')
+    
+    # 创建宠物窗口
+    pet = PetWindow()
+    pet.show()
+    
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
