@@ -44,7 +44,12 @@
 
 - 1.x 设置依赖当前工作目录，打包后从不同目录启动会读写不同配置。
 - 默认是否上传代码没有独立配置，不能满足“默认不上传”。
-- 没有长期记忆边界；V0.1 新增 `MemoryService` 接口，但不宣称已实现持久化记忆。
+- 第二阶段已实现 SQLite 持久化记忆：真实 user/assistant 消息、UTC 时间戳、角色 ID、会话 ID、类型和事实来源。
+- 已实现 short_term、episodic、preference、summary 四类；偏好和情景记忆只由用户显式管理，不自动推断。
+- FTS5 检索已启用；中文子串或 FTS 无结果时降级到参数化 LIKE。
+- 摘要采用抽取式原文切片并保存 source ID，不调用模型编造摘要。
+- 数据库与模型请求均通过工作线程执行；ChatDialog 初始化也异步恢复历史。
+- API Key 和 diagnostic code 字段不写入记忆库；聊天中用户主动发送的文本按真实用户消息保存。
 
 ## 构建流程
 
@@ -63,5 +68,13 @@
 1. UI 线程网络阻塞。
 2. 明文密钥和默认代码上传语义不清。
 3. 单文件耦合导致改动容易破坏动画与拖拽。
-4. Windows UI Automation 对 VSCode/Electron 文本坐标的暴露依版本和无障碍设置变化，必须先做探针实验。
+4. Windows UI Automation 在当前 VSCode/Electron 环境仍不暴露文本范围；精确定位改用 decoration + 前台窗口截图。被遮挡窗口不截图、不抢焦点。
 5. 当前源码中有较多历史乱码显示；修复时要避免一次性重写造成行为回归。
+
+## 第二阶段定位结论
+
+- VSCode Extension Host 真实激活和诊断事件已经联调。
+- 精确路径：活动且可见 range → 洋红 decoration → 文档标题匹配 HWND → 前台窗口截图 → 确定性颜色聚类 → 屏幕坐标。
+- DPI：主进程启用 Per-Monitor-V2；真实 200% 缩放环境下完成字段定位和导航。
+- 多窗口：按 `document_name` 匹配窗口；目标窗口被其他窗口遮挡时不使用错误截图。
+- 降级：前台窗口中找不到 decoration 时移动到明确标记为 `precise=False` 的窗口边缘；后台窗口则不导航。

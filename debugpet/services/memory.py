@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,13 +77,18 @@ class SQLiteMemoryService(MemoryService):
     def fts_available(self) -> bool:
         return self._fts_available
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterable[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._schema_lock, self._connect() as connection:
@@ -254,6 +260,8 @@ class SQLiteMemoryService(MemoryService):
                    AND character_id = ? AND deleted_at IS NULL""",
                 (content, entry_id, character_id),
             )
+            if cursor.rowcount == 1:
+                self._invalidate_summaries(connection, character_id, entry_id)
         return cursor.rowcount == 1
 
     def delete_entry(self, entry_id: int, character_id: str) -> bool:
@@ -263,7 +271,25 @@ class SQLiteMemoryService(MemoryService):
                    AND character_id = ? AND deleted_at IS NULL""",
                 (utc_now(), entry_id, character_id),
             )
+            if cursor.rowcount == 1:
+                self._invalidate_summaries(connection, character_id, entry_id)
         return cursor.rowcount == 1
+
+    def _invalidate_summaries(self, connection: sqlite3.Connection,
+                              character_id: str, source_id: int) -> None:
+        summaries = connection.execute(
+            """SELECT id, source_ids FROM memory_entries WHERE character_id = ?
+               AND kind = 'summary' AND deleted_at IS NULL""",
+            (character_id,),
+        ).fetchall()
+        affected = [int(row["id"]) for row in summaries
+                    if source_id in set(json.loads(row["source_ids"] or "[]"))]
+        if affected:
+            connection.execute(
+                f"""UPDATE memory_entries SET deleted_at = ?
+                     WHERE id IN ({','.join('?' for _ in affected)})""",
+                (utc_now(), *affected),
+            )
 
     def clear(self, character_id: str) -> int:
         with self._connect() as connection:

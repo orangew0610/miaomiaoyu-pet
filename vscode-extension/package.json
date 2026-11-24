@@ -4,6 +4,10 @@
   "description": "Send local VSCode diagnostics to DebugPet without uploading source code.",
   "version": "0.2.0",
   "publisher": "debugpet-local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/orangew0610/miaomiaoyu-pet.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

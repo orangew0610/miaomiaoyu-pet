@@ -1,3 +1,5 @@
+import shutil
+
 from debugpet.services.memory import SQLiteMemoryService
 
 
@@ -76,3 +78,33 @@ def test_disable_memory_stops_storage_and_injection(tmp_path) -> None:
     assert service.recent_messages("miaomiao") == []
     context = service.build_context("miaomiao", "当前问题", "角色设定")
     assert context.messages == ({"role": "user", "content": "当前问题"},)
+
+
+def test_deleting_summarized_source_invalidates_summary(tmp_path) -> None:
+    service = SQLiteMemoryService(tmp_path / "memory.sqlite3")
+    entries = []
+    for index in range(40):
+        entries.append(service.add_message(
+            "miaomiao", "long", "user" if index % 2 == 0 else "assistant",
+            f"可删除事实 {index}",
+        ))
+    service.build_context("miaomiao", "可删除事实", "角色设定", budget_tokens=1000)
+    summary = service.list_entries("miaomiao", kinds=("summary",))[0]
+    source_id = summary.source_ids[0]
+    source = next(item for item in entries if item.id == source_id)
+
+    assert service.delete_entry(source_id, "miaomiao")
+    assert service.list_entries("miaomiao", kinds=("summary",)) == []
+    context = service.build_context("miaomiao", source.content, "角色设定", budget_tokens=1000)
+    assert source.content not in context.system_prompt
+
+
+def test_database_connections_are_closed_after_operations(tmp_path) -> None:
+    database_dir = tmp_path / "database"
+    service = SQLiteMemoryService(database_dir / "memory.sqlite3")
+    service.add_message("miaomiao", "session", "user", "temporary fact")
+    service.recent_messages("miaomiao")
+
+    # Windows refuses this removal when any SQLite handle is still open.
+    shutil.rmtree(database_dir)
+    assert not database_dir.exists()

@@ -8,7 +8,11 @@ DebugPet 是一个基于 PyQt5 的 Windows 桌面宠物。当前 `feature/debugp
 
 ```powershell
 # 首次创建环境（已创建时无需重复执行）
-& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv .venv
+# 本机已安装 Python 3.12 时
+python -m venv .venv
+
+# 或使用仓库目录内的便携解释器（本开发环境采用此方式）
+.\.python\tools\python.exe -m venv .venv
 
 # 激活环境并安装依赖
 .\.venv\Scripts\Activate.ps1
@@ -64,6 +68,25 @@ npm.cmd run compile
 ```
 
 当前源码和协议已建立，但在 Extension Host 完成真实诊断验收前仍视为开发版本。
+
+安装本地 VSIX：
+
+```powershell
+cd vscode-extension
+npm.cmd exec vsce package -- --out debugpet-vscode-0.2.0.vsix
+code.cmd --install-extension .\debugpet-vscode-0.2.0.vsix --force
+```
+
+扩展默认只发送诊断元数据。只有活动编辑器中可见的错误会触发主动定位；隐藏或后台窗口中的错误不会抢焦点。定位使用临时洋红 decoration 与本地截图颜色检测，不调用视觉模型。
+
+## 持久化记忆
+
+- SQLite 数据库位于当前用户的 `%APPDATA%\DebugPet\memory.sqlite3`。
+- 右上角“🧠 记忆”可查看、编辑、删除、清空、关闭记忆，并可新增用户偏好或情景记忆。
+- 对话消息按角色 ID 隔离，关闭窗口或重启后仍可恢复。
+- FTS5 无结果或不可用时自动回退到参数化 LIKE 检索。
+- 长对话摘要是带 `[source:id]` 的抽取式摘录，不生成不存在的经历。
+- 删除记忆后，该条目不会再进入后续模型上下文。
 
 ## 安全约定
 
