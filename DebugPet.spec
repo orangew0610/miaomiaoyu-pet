@@ -1,29 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('D:\\Desktop\\debugger\\miaomiao-all-actions', 'miaomiao-all-actions'), ('D:\\Desktop\\debugger\\yu.md', '.')]
+
+ROOT = Path(SPECPATH)
+datas = [
+    (str(ROOT / "miaomiao-all-actions"), "miaomiao-all-actions"),
+    (str(ROOT / "characters"), "characters"),
+    (str(ROOT / "yu.md"), "."),
+]
 binaries = []
 hiddenimports = []
-tmp_ret = collect_all('PyQt5')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('PIL')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('requests')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('pyflakes')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+for package in ("PyQt5", "PIL", "requests", "pyflakes", "keyring"):
+    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
 
 a = Analysis(
-    ['D:\\Desktop\\debugger\\debug_pet_pyqt.py'],
-    pathex=[],
+    [str(ROOT / "debug_pet_pyqt.py")],
+    pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy', 'scipy', 'pandas'],
+    excludes=["matplotlib", "numpy", "scipy", "pandas"],
     noarchive=False,
     optimize=0,
 )
@@ -35,7 +40,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='DebugPet',
+    name="DebugPet",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -48,5 +53,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='NONE',
+    icon="NONE",
 )

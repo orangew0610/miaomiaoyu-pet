@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "miaomiao",
+  "display_name": "喵喵鱼",
+  "asset_directory": "miaomiao-all-actions",
+  "prompt_file": "yu.md",
+  "actions": {
+    "idle": ["idle1.gif", "idle2.gif", "idle3.gif"],
+    "walking_left": "running-right.gif",
+    "walking_right": "running-right.gif",
+    "jumping_left": "jumping-left.gif",
+    "jumping_right": "jumping-left.gif",
+    "thinking": "rewiew.gif",
+    "happy": "waving.gif",
+    "sad": "failed.gif",
+    "waiting": "waiting.gif",
+    "failed": "failed.gif"
+  }
+}

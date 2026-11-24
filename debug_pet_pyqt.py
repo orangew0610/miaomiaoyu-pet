@@ -11,7 +11,15 @@ import subprocess
 import tempfile
 import re
 import json
+import html
 from datetime import datetime
+
+from debugpet.services.api import ModelApiClient
+from debugpet.services.config import ConfigService, ModelConfig
+from debugpet.services.diagnostics import DiagnosticEvent, DiagnosticGate, Severity
+from debugpet.services.ipc import DiagnosticIpcServer
+from debugpet.services.window_locator import find_vscode_anchor
+from debugpet.services.workers import ApiRequestWorker
 
 # PyQt5 导入
 from PyQt5.QtWidgets import (
@@ -125,6 +133,17 @@ class PetWindow(QWidget):
         
         # 设置定时器
         self._setup_timers()
+
+        # VSCode diagnostics use authenticated loopback IPC. No source is
+        # required for the local reaction path.
+        self.diagnostic_gate = DiagnosticGate()
+        self.ipc_server = DiagnosticIpcServer(parent=self)
+        self.ipc_server.diagnostic_received.connect(self._on_diagnostic_event)
+        self.ipc_server.protocol_error.connect(
+            lambda error: print(f"[IPC] {error}")
+        )
+        if not self.ipc_server.start():
+            print("[IPC] failed to start")
         
         # 启动移动定时器
         self.move_timer.start()
@@ -553,8 +572,14 @@ class PetWindow(QWidget):
         
         # 随机选择目标位置
         margin = 50
-        self.target_x = random.randint(margin, screen_width - self.pet_width - margin)
-        self.target_y = random.randint(margin, screen_height - self.pet_height - margin)
+        self.target_x = random.randint(
+            screen_geo.left() + margin,
+            screen_geo.left() + screen_width - self.pet_width - margin,
+        )
+        self.target_y = random.randint(
+            screen_geo.top() + margin,
+            screen_geo.top() + screen_height - self.pet_height - margin,
+        )
         
         # 设置方向并更新动画状态
         if self.target_x > self.pet_x:
@@ -612,11 +637,83 @@ class PetWindow(QWidget):
     
     def _clamp_position(self):
         """限制宠物位置在屏幕内"""
-        screen = QApplication.primaryScreen()
+        screen = QApplication.screenAt(QPoint(int(self.pet_x), int(self.pet_y)))
+        screen = screen or QApplication.primaryScreen()
         if screen:
-            screen_geo = screen.geometry()
-            self.pet_x = int(max(0, min(self.pet_x, screen_geo.width() - self.pet_width)))
-            self.pet_y = int(max(0, min(self.pet_y, screen_geo.height() - self.pet_height)))
+            screen_geo = screen.availableGeometry()
+            self.pet_x = int(max(
+                screen_geo.left(),
+                min(self.pet_x, screen_geo.right() - self.pet_width + 1),
+            ))
+            self.pet_y = int(max(
+                screen_geo.top(),
+                min(self.pet_y, screen_geo.bottom() - self.pet_height + 1),
+            ))
+
+    def _move_to_target(self, x, y):
+        """Move toward an externally supplied screen target."""
+        self.target_x = int(x)
+        self.target_y = int(y)
+        self._clamp_target()
+        self.walk_direction = 1 if self.target_x > self.pet_x else -1
+        self._set_state(
+            PET_STATE_WALKING_RIGHT
+            if self.walk_direction > 0
+            else PET_STATE_WALKING_LEFT
+        )
+        self.is_moving = True
+        self._move_step()
+
+    def _clamp_target(self):
+        screen = QApplication.screenAt(QPoint(self.target_x, self.target_y))
+        screen = screen or QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            self.target_x = max(
+                geometry.left(),
+                min(self.target_x, geometry.right() - self.pet_width + 1),
+            )
+            self.target_y = max(
+                geometry.top(),
+                min(self.target_y, geometry.bottom() - self.pet_height + 1),
+            )
+
+    def _on_diagnostic_event(self, payload):
+        try:
+            event = DiagnosticEvent(
+                uri=str(payload["uri"]),
+                version=int(payload["version"]),
+                severity=Severity(int(payload["severity"])),
+                message=str(payload["message"]),
+                line=int(payload["line"]),
+                character=int(payload["character"]),
+                end_line=int(payload["end_line"]),
+                end_character=int(payload["end_character"]),
+                removed=bool(payload.get("removed", False)),
+            )
+        except (KeyError, TypeError, ValueError):
+            print("[IPC] invalid diagnostic payload")
+            return
+        if not self.diagnostic_gate.accept(event):
+            return
+
+        self.last_interaction_time = datetime.now()
+        if event.removed:
+            self.is_moving = False
+            self._set_state(PET_STATE_HAPPY)
+            self._update_bubble("修好了！这次值得庆祝一下。", PET_STATE_HAPPY)
+            QTimer.singleShot(4500, lambda: self._set_state(PET_STATE_IDLE))
+            return
+
+        anchor = find_vscode_anchor()
+        if anchor:
+            self._move_to_target(*anchor)
+        severity_name = "错误" if event.severity == Severity.ERROR else "警告"
+        line_number = event.line + 1
+        self._update_bubble(
+            f"第 {line_number} 行有个{severity_name}：{event.message}",
+            PET_STATE_SAD if event.severity == Severity.ERROR else PET_STATE_THINKING,
+        )
     
     def _init_qi_yu_quotes(self):
         """初始化祁煜语录列表"""
@@ -1188,7 +1285,12 @@ class PetWindow(QWidget):
     
     def _quit_app(self):
         """退出应用"""
+        self.ipc_server.stop()
         QApplication.quit()
+
+    def closeEvent(self, event):
+        self.ipc_server.stop()
+        super().closeEvent(event)
 
 
 # ============== 代码检查器对话框 ==============
@@ -1215,6 +1317,7 @@ class CodeCheckerDialog(QDialog):
         
         # 加载设置
         self._load_settings()
+        self.request_worker = None
         
         self._init_ui()
         
@@ -1224,43 +1327,13 @@ class CodeCheckerDialog(QDialog):
     
     def _load_settings(self):
         """加载设置"""
-        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        self.api_url = os.environ.get("API_URL", "https://api.deepseek.com/chat/completions")
-        self.ai_service = os.environ.get("AI_SERVICE", "deepseek")
-        
-        # 从文件加载（使用当前工作目录，方便用户修改）
-        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
-        try:
-            if os.path.exists(settings_file):
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith('DEEPSEEK_API_KEY='):
-                            self.api_key = line.split('=', 1)[1]
-                        elif line.startswith('GLM_API_KEY='):
-                            self.api_key = line.split('=', 1)[1]
-                        elif line.startswith('API_URL='):
-                            self.api_url = line.split('=', 1)[1]
-                        elif line.startswith('USE_AI='):
-                            self.use_ai = line.split('=', 1)[1].lower() == 'true'
-                        elif line.startswith('AI_SERVICE='):
-                            self.ai_service = line.split('=', 1)[1]
-        except:
-            pass
-        
-        # 默认值
-        if not hasattr(self, 'use_ai'):
-            self.use_ai = False
-        
-        # 默认服务
-        if not hasattr(self, 'ai_service'):
-            self.ai_service = "deepseek"
-        
-        # 根据 AI 服务自动设置 API URL
-        if self.ai_service == "glm":
-            self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        else:
-            self.api_url = "https://api.deepseek.com/chat/completions"
+        self.config_service = ConfigService()
+        self.model_config = self.config_service.load()
+        self.api_key = self.config_service.get_api_key(self.model_config.provider)
+        self.api_url = self.model_config.api_url
+        self.ai_service = self.model_config.provider
+        self.model_name = self.model_config.model
+        self.use_ai = self.model_config.ai_enabled
     
     def _init_ui(self):
         """初始化 UI - 粉紫蓝主题"""
@@ -1451,8 +1524,20 @@ class CodeCheckerDialog(QDialog):
             self.error_text.setText("⚠️ 请输入代码！")
             return
         
-        # 如果启用了 AI 且有 API Key，使用 AI 检测
-        if self.use_ai and self.api_key and requests:
+        # 上传代码必须由用户在设置中单独、明确授权。
+        if self.use_ai and not self.model_config.allow_code_upload:
+            self.error_text.setText(
+                "🔒 AI 分析已启用，但代码上传未授权。已改用本地检查。\n"
+                "如需 AI 分析，请在设置中开启“允许将代码发送给模型”。"
+            )
+            errors = self._check_python(code)
+            if errors:
+                self.error_text.append("\n🐛 本地检查发现问题：")
+                for err in errors:
+                    self.error_text.append(f"第 {err['line']} 行: {err['message']}")
+            return
+
+        if self.use_ai and self.model_config.allow_code_upload and self.api_key:
             self.error_text.setText("🤖 正在使用 AI 分析代码...")
             self._check_with_ai(code)
         else:
@@ -1476,33 +1561,8 @@ class CodeCheckerDialog(QDialog):
                     self.parent_window._set_state('idle4')
     
     def _check_with_ai(self, code):
-        """使用 AI 检测代码 - 支持 DeepSeek 和 GLM"""
-        if not requests:
-            self.error_text.setText("⚠️ 未安装 requests 库，无法使用 AI 检测。\n请运行: pip install requests")
-            return
-        
-        try:
-            # 根据服务类型设置参数
-            if self.ai_service == "glm":
-                # GLM-4.7-Flash 设置
-                api_url = self.api_url if self.api_url else "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-                model = "glm-4-flash"
-                headers = {
-                    "Content-Type": "application/json",
-                }
-                # GLM 需要 API Key
-                if self.api_key:
-                    headers["Authorization"] = f"Bearer {self.api_key}"
-            else:
-                # DeepSeek 设置
-                api_url = self.api_url if self.api_url else "https://api.deepseek.com/chat/completions"
-                model = "deepseek-chat"
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}"
-                }
-            
-            prompt = f"""请分析以下代码，找出其中的错误、bug 或潜在问题。请用中文回答。
+        """在工作线程中执行明确授权的 AI 代码分析。"""
+        prompt = f"""请分析以下代码，找出其中的错误、bug 或潜在问题。请用中文回答。
 
 代码：
 ```python
@@ -1513,42 +1573,45 @@ class CodeCheckerDialog(QDialog):
 如果代码有问题，列出具体的问题和建议。
 如果代码没有问题，请明确说明"代码没有问题"。
 """
-            
-            data = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一个专业的代码审查专家，擅长发现代码中的错误和潜在问题。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.3
-            }
-            
-            response = requests.post(api_url, headers=headers, json=data, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                ai_message = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                
-                # 判断 AI 是否认为代码有问题
-                if "没有问题" in ai_message or "代码正确" in ai_message or "代码没有错误" in ai_message:
-                    self.error_text.setText("✅ AI 检测通过！\n\n" + ai_message)
-                    # 通过时显示 idle4 动作，停止移动
-                    if self.parent_window:
-                        self.parent_window.is_moving = False
-                        self.parent_window._set_state('idle4')
-                else:
-                    self.error_text.setText("🐛 AI 发现问题：\n\n" + ai_message)
-                    # 报错时显示 failed 动作，停止移动
-                    if self.parent_window:
-                        self.parent_window.is_moving = False
-                        self.parent_window._update_bubble("发现错误！", PET_STATE_SAD)
-            else:
-                error_msg = f"⚠️ API 请求失败 (状态码: {response.status_code})\n\n{response.text}"
-                self.error_text.setText(error_msg)
-        except requests.exceptions.Timeout:
-            self.error_text.setText("⚠️ API 请求超时，请检查网络连接。")
-        except Exception as e:
-            self.error_text.setText(f"⚠️ AI 检测失败: {str(e)}")
+        client = ModelApiClient(self.model_config, self.api_key)
+        self.check_btn.setEnabled(False)
+        self.request_worker = ApiRequestWorker(
+            lambda: client.chat(
+                "你是一个专业的代码审查专家，擅长发现代码中的错误和潜在问题。",
+                [{"role": "user", "content": prompt}],
+            ),
+            self,
+        )
+        self.request_worker.succeeded.connect(self._on_ai_check_success)
+        self.request_worker.failed.connect(self._on_ai_check_error)
+        self.request_worker.finished.connect(self._finish_ai_check)
+        self.request_worker.start()
+
+    def _on_ai_check_success(self, result):
+        ai_message = result.reply
+        passed = any(
+            marker in ai_message
+            for marker in ("没有问题", "代码正确", "代码没有错误")
+        )
+        if passed:
+            self.error_text.setText("✅ AI 检测通过！\n\n" + ai_message)
+            if self.parent_window:
+                self.parent_window.is_moving = False
+                self.parent_window._set_state('idle4')
+        else:
+            self.error_text.setText("🐛 AI 发现问题：\n\n" + ai_message)
+            if self.parent_window:
+                self.parent_window.is_moving = False
+                self.parent_window._update_bubble("发现错误！", PET_STATE_SAD)
+
+    def _on_ai_check_error(self, error_message):
+        self.error_text.setText(f"⚠️ AI 检测失败: {error_message}")
+
+    def _finish_ai_check(self):
+        self.check_btn.setEnabled(True)
+        if self.request_worker:
+            self.request_worker.deleteLater()
+            self.request_worker = None
     
     def _check_python(self, code):
         """使用 py_compile 检查 Python 代码"""
@@ -1560,7 +1623,7 @@ class CodeCheckerDialog(QDialog):
         
         try:
             result = subprocess.run(
-                ['python', '-m', 'py_compile', temp_file],
+                [sys.executable, '-m', 'py_compile', temp_file],
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
@@ -1592,7 +1655,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙ 设置")
-        self.setGeometry(300, 300, 500, 450)
+        self.setGeometry(300, 200, 540, 650)
         self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
 
         self.setWindowOpacity(0.93)
@@ -1612,43 +1675,13 @@ class SettingsDialog(QDialog):
 
     def _load_settings(self):
         """加载设置"""
-        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        self.api_url = os.environ.get("API_URL", "https://api.deepseek.com/chat/completions")
-        self.ai_service = os.environ.get("AI_SERVICE", "deepseek")
-
-        # 从文件加载（使用当前工作目录，方便用户修改）
-        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
-        try:
-            if os.path.exists(settings_file):
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith('DEEPSEEK_API_KEY='):
-                            self.api_key = line.split('=', 1)[1]
-                        elif line.startswith('GLM_API_KEY='):
-                            self.api_key = line.split('=', 1)[1]
-                        elif line.startswith('API_URL='):
-                            self.api_url = line.split('=', 1)[1]
-                        elif line.startswith('USE_AI='):
-                            self.use_ai = line.split('=', 1)[1].lower() == 'true'
-                        elif line.startswith('AI_SERVICE='):
-                            self.ai_service = line.split('=', 1)[1]
-        except:
-            pass
-
-        # 默认值
-        if not hasattr(self, 'use_ai'):
-            self.use_ai = False
-
-        # 默认服务
-        if not hasattr(self, 'ai_service'):
-            self.ai_service = "deepseek"
-
-        # 根据 AI 服务自动设置 API URL
-        if self.ai_service == "glm":
-            self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        else:
-            self.api_url = "https://api.deepseek.com/chat/completions"
+        self.config_service = ConfigService()
+        self.model_config = self.config_service.load()
+        self.api_key = self.config_service.get_api_key(self.model_config.provider)
+        self.api_url = self.model_config.api_url
+        self.ai_service = self.model_config.provider
+        self.model_name = self.model_config.model
+        self.use_ai = self.model_config.ai_enabled
 
     def _init_ui(self):
         """初始化 UI - 粉紫蓝主题"""
@@ -1768,6 +1801,16 @@ class SettingsDialog(QDialog):
         self.api_url_input.setText(self.api_url)
         layout.addWidget(self.api_url_input)
 
+        model_label = QLabel("模型名称:")
+        model_label.setStyleSheet("color: #4A148C; font-size: 20px; background-color: transparent; padding-top: 5px;")
+        layout.addWidget(model_label)
+
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("例如 deepseek-chat 或本地模型名称")
+        self.model_input.setText(self.model_name)
+        self.model_input.setStyleSheet(self.api_url_input.styleSheet())
+        layout.addWidget(self.model_input)
+
         # 使用 AI 开关
         self.use_ai_checkbox = QPushButton("🤖 启用 AI 分析")
         self.use_ai_checkbox.setCheckable(True)
@@ -1794,6 +1837,12 @@ class SettingsDialog(QDialog):
             }
         """)
         layout.addWidget(self.use_ai_checkbox)
+
+        self.allow_code_upload_checkbox = QPushButton("🔒 允许将代码发送给模型")
+        self.allow_code_upload_checkbox.setCheckable(True)
+        self.allow_code_upload_checkbox.setChecked(self.model_config.allow_code_upload)
+        self.allow_code_upload_checkbox.setStyleSheet(self.use_ai_checkbox.styleSheet())
+        layout.addWidget(self.allow_code_upload_checkbox)
 
         layout.addStretch()
 
@@ -1852,38 +1901,23 @@ class SettingsDialog(QDialog):
         """当 AI 服务改变时，自动更新 API URL"""
         if service_name == "DeepSeek":
             self.api_url_input.setText("https://api.deepseek.com/chat/completions")
+            self.model_input.setText("deepseek-chat")
         elif service_name == "GLM-4.7-Flash":
             self.api_url_input.setText("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+            self.model_input.setText("glm-4-flash")
     
     def _save_settings(self):
         """保存设置"""
-        # 保存到环境变量
-        os.environ["DEEPSEEK_API_KEY"] = self.api_key_input.text()
-        os.environ["API_URL"] = self.api_url_input.text()
-        os.environ["AI_SERVICE"] = "deepseek" if self.service_combo.currentText() == "DeepSeek" else "glm"
-        
-        # 保存到文件（保存到当前工作目录，方便用户修改）
-        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
-        try:
-            with open(settings_file, 'w', encoding='utf-8') as f:
-                f.write(f"# Debug Pet 配置文件\n\n")
-                f.write(f"# 启用 AI 代码分析功能\n")
-                f.write(f"USE_AI={self.use_ai_checkbox.isChecked()}\n\n")
-                f.write(f"# AI 服务选择: deepseek 或 glm\n")
-                f.write(f"AI_SERVICE={'deepseek' if self.service_combo.currentText() == 'DeepSeek' else 'glm'}\n\n")
-                
-                # 根据选择的服务保存对应的 API Key
-                if self.service_combo.currentText() == "DeepSeek":
-                    f.write(f"# DeepSeek API 密钥\n")
-                    f.write(f"DEEPSEEK_API_KEY={self.api_key_input.text()}\n")
-                else:
-                    f.write(f"# GLM API 密钥\n")
-                    f.write(f"GLM_API_KEY={self.api_key_input.text()}\n")
-                
-                f.write(f"\n# 自定义 API 地址\n")
-                f.write(f"API_URL={self.api_url_input.text()}\n")
-        except:
-            pass
+        provider = "deepseek" if self.service_combo.currentText() == "DeepSeek" else "glm"
+        config = ModelConfig(
+            provider=provider,
+            api_url=self.api_url_input.text().strip(),
+            model=self.model_input.text().strip(),
+            ai_enabled=self.use_ai_checkbox.isChecked(),
+            allow_code_upload=self.allow_code_upload_checkbox.isChecked(),
+        )
+        self.config_service.save(config)
+        self.config_service.set_api_key(provider, self.api_key_input.text().strip())
         
         self.accept()
 
@@ -1901,6 +1935,7 @@ class ChatDialog(QDialog):
 
         # 对话历史（用于上下文记忆）
         self.message_history = []
+        self.request_worker = None
 
         self.setWindowTitle("💬 和我对话")
         self.setGeometry(300, 300, 580, 500)
@@ -1919,38 +1954,11 @@ class ChatDialog(QDialog):
     
     def _load_settings(self):
         """加载设置"""
-        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        self.api_url = os.environ.get("API_URL", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
-        self.ai_service = os.environ.get("AI_SERVICE", "glm")
-        
-        # 从当前工作目录加载（支持打包后运行）
-        settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
-        try:
-            if os.path.exists(settings_file):
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith('DEEPSEEK_API_KEY='):
-                            self.api_key = line.split('=', 1)[1]
-                        elif line.startswith('GLM_API_KEY='):
-                            self.api_key = line.split('=', 1)[1]
-                        elif line.startswith('API_URL='):
-                            self.api_url = line.split('=', 1)[1]
-                        elif line.startswith('USE_AI='):
-                            self.use_ai = line.split('=', 1)[1].lower() == 'true'
-                        elif line.startswith('AI_SERVICE='):
-                            self.ai_service = line.split('=', 1)[1]
-        except:
-            pass
-        
-        if not hasattr(self, 'ai_service'):
-            self.ai_service = "glm"
-        
-        # 根据 AI 服务自动设置 API URL
-        if self.ai_service == "glm":
-            self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        else:
-            self.api_url = "https://api.deepseek.com/chat/completions"
+        self.config_service = ConfigService()
+        self.model_config = self.config_service.load()
+        self.api_key = self.config_service.get_api_key(self.model_config.provider)
+        self.api_url = self.model_config.api_url
+        self.ai_service = self.model_config.provider
     
     def _init_ui(self):
         """初始化 UI - 粉紫蓝主题"""
@@ -2067,7 +2075,7 @@ class ChatDialog(QDialog):
             </div>
           </div>
         </div>
-        '''.format(text=text)
+        '''.format(text=html.escape(text))
 
     def _make_ai_bubble(self, text):
         """生成祁煜消息气泡（左侧，粉紫色系）"""
@@ -2083,7 +2091,7 @@ class ChatDialog(QDialog):
             </div>
           </div>
         </div>
-        '''.format(text=text)
+        '''.format(text=html.escape(text))
 
     def _make_error_bubble(self, text):
         """生成错误消息气泡（左侧，红色系）"""
@@ -2099,7 +2107,7 @@ class ChatDialog(QDialog):
             </div>
           </div>
         </div>
-        '''.format(text=text)
+        '''.format(text=html.escape(text))
 
     def _send_message(self):
         """发送消息"""
@@ -2130,62 +2138,41 @@ class ChatDialog(QDialog):
         return None
     
     def _get_qi_yu_response(self, message):
-        """获取祁煜风格的回复"""
-        if not requests:
-            self.chat_history.append(self._make_error_bubble("抱歉，我现在无法回应……"))
+        """Start a model request without blocking Qt's UI thread."""
+        qi_yu_prompt = self._load_qi_yu_prompt()
+        if not qi_yu_prompt:
+            self.chat_history.append(self._make_error_bubble("我的剧本好像丢了……"))
             self.send_btn.setEnabled(True)
             return
-        
-        try:
-            # 使用配置的 API
-            api_url = self.api_url if self.api_url else "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-            model = "deepseek-chat" if self.ai_service == "deepseek" else "glm-4-flash"
-            
-            headers = {
-                "Content-Type": "application/json",
-            }
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            
-            qi_yu_prompt = self._load_qi_yu_prompt()
-            if not qi_yu_prompt:
-                self.chat_history.append(self._make_error_bubble("我的剧本好像丢了……"))
-                self.send_btn.setEnabled(True)
-                return
-            
-            data = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": qi_yu_prompt}
-                ] + self.message_history[-30:] + [
-                    {"role": "user", "content": message}
-                ],
-                "temperature": 0.7
-            }
-            
-            response = requests.post(api_url, headers=headers, json=data, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                
-                # 添加 AI 回复气泡到历史
-                self.chat_history.append(self._make_ai_bubble(reply))
-                
-                # 添加到上下文历史
-                self.message_history.append({"role": "assistant", "content": reply})
-                
-                # 更新宠物状态
-                if self.parent_window:
-                    self.parent_window._set_state(PET_STATE_HAPPY)
-            else:
-                self.chat_history.append(self._make_error_bubble("信号不太好，我听不清楚……"))
-        except requests.exceptions.Timeout:
-            self.chat_history.append(self._make_error_bubble("深海信号延迟了，稍后再试……"))
-        except Exception as e:
-            self.chat_history.append(self._make_error_bubble("抱歉，我现在无法回应……"))
-        
+
+        client = ModelApiClient(self.model_config, self.api_key)
+        history_snapshot = list(self.message_history)
+        self.request_worker = ApiRequestWorker(
+            lambda: client.chat(qi_yu_prompt, history_snapshot),
+            self,
+        )
+        self.request_worker.succeeded.connect(self._on_chat_success)
+        self.request_worker.failed.connect(self._on_chat_error)
+        self.request_worker.finished.connect(self._finish_chat_request)
+        self.request_worker.start()
+
+    def _on_chat_success(self, result):
+        reply = result.reply
+        self.chat_history.append(self._make_ai_bubble(reply))
+        self.message_history.append({"role": "assistant", "content": reply})
+        if self.parent_window:
+            self.parent_window._set_state(PET_STATE_HAPPY)
+
+    def _on_chat_error(self, error_message):
+        self.chat_history.append(
+            self._make_error_bubble(f"抱歉，我现在无法回应：{error_message}")
+        )
+
+    def _finish_chat_request(self):
         self.send_btn.setEnabled(True)
+        if self.request_worker:
+            self.request_worker.deleteLater()
+            self.request_worker = None
 
 
 # ============== 主程序 ==============
