@@ -25,6 +25,8 @@ class ModelConfig:
     ai_enabled: bool = False
     allow_code_upload: bool = False
     timeout_seconds: int = 30
+    character_id: str = "miaomiao"
+    context_budget_tokens: int = 8000
 
 
 class ConfigService:

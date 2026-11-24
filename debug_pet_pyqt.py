@@ -12,12 +12,14 @@ import tempfile
 import re
 import json
 import html
+import uuid
 from datetime import datetime
 
 from debugpet.services.api import ModelApiClient
 from debugpet.services.config import ConfigService, ModelConfig
 from debugpet.services.diagnostics import DiagnosticEvent, DiagnosticGate, Severity
 from debugpet.services.ipc import DiagnosticIpcServer
+from debugpet.services.memory import NullMemoryService, SQLiteMemoryService
 from debugpet.services.window_locator import find_vscode_anchor
 from debugpet.services.workers import ApiRequestWorker
 
@@ -25,7 +27,8 @@ from debugpet.services.workers import ApiRequestWorker
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QMenu, QMessageBox,
     QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, 
-    QScrollArea, QFrame, QDialog, QLineEdit, QFileDialog, QComboBox
+    QScrollArea, QFrame, QDialog, QLineEdit, QFileDialog, QComboBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QPropertyAnimation, 
@@ -1915,11 +1918,154 @@ class SettingsDialog(QDialog):
             model=self.model_input.text().strip(),
             ai_enabled=self.use_ai_checkbox.isChecked(),
             allow_code_upload=self.allow_code_upload_checkbox.isChecked(),
+            character_id=self.model_config.character_id,
+            context_budget_tokens=self.model_config.context_budget_tokens,
         )
         self.config_service.save(config)
         self.config_service.set_api_key(provider, self.api_key_input.text().strip())
         
         self.accept()
+
+
+# ============== 记忆管理对话框 ==============
+class MemoryDialog(QDialog):
+    """Manage one character's persisted memories without blocking the UI."""
+
+    def __init__(self, memory_service, character_id, parent=None):
+        super().__init__(parent)
+        self.memory_service = memory_service
+        self.character_id = character_id
+        self.workers = []
+        self.setWindowTitle("🧠 记忆管理")
+        self.resize(820, 520)
+        self._init_ui()
+        self._reload()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        self.status_label = QLabel("正在读取记忆……")
+        layout.addWidget(self.status_label)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["ID", "类型", "时间", "内容"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 60)
+        self.table.setColumnWidth(1, 100)
+        self.table.setColumnWidth(2, 180)
+        layout.addWidget(self.table)
+
+        buttons = QHBoxLayout()
+        for label, callback in (
+            ("新增偏好", lambda: self._add_memory("preference")),
+            ("新增情景", lambda: self._add_memory("episodic")),
+            ("保存编辑", self._save_selected),
+            ("删除选中", self._delete_selected),
+            ("清空本角色", self._clear_all),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            buttons.addWidget(button)
+        self.enabled_button = QPushButton("记忆已启用")
+        self.enabled_button.setCheckable(True)
+        self.enabled_button.clicked.connect(self._toggle_enabled)
+        buttons.addWidget(self.enabled_button)
+        layout.addLayout(buttons)
+
+    def _run_async(self, operation, on_success=None):
+        worker = ApiRequestWorker(operation, self)
+        self.workers.append(worker)
+        if on_success:
+            worker.succeeded.connect(on_success)
+        worker.failed.connect(lambda error: self.status_label.setText(f"操作失败：{error}"))
+
+        def cleanup():
+            if worker in self.workers:
+                self.workers.remove(worker)
+            worker.deleteLater()
+
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _load_data(self):
+        return (
+            self.memory_service.list_entries(self.character_id, limit=300),
+            self.memory_service.is_enabled(self.character_id),
+        )
+
+    def _reload(self):
+        self._run_async(self._load_data, self._show_entries)
+
+    def _show_entries(self, result):
+        entries, enabled = result
+        self.table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            values = [str(entry.id), entry.kind, entry.created_at, entry.content]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column != 3:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, column, item)
+        self.enabled_button.setChecked(enabled)
+        self.enabled_button.setText("记忆已启用" if enabled else "记忆已关闭")
+        self.status_label.setText(f"共 {len(entries)} 条；不同角色的数据彼此隔离。")
+
+    def _selected(self):
+        row = self.table.currentRow()
+        if row < 0:
+            self.status_label.setText("请先选择一条记忆。")
+            return None
+        return int(self.table.item(row, 0).text()), self.table.item(row, 3).text()
+
+    def _add_memory(self, kind):
+        label = "用户偏好" if kind == "preference" else "情景记忆"
+        content, accepted = QInputDialog.getMultiLineText(self, f"新增{label}", "内容：")
+        if accepted and content.strip():
+            self._run_async(
+                lambda: self.memory_service.add_user_memory(
+                    self.character_id, content.strip(), kind
+                ),
+                lambda _result: self._reload(),
+            )
+
+    def _save_selected(self):
+        selected = self._selected()
+        if selected:
+            entry_id, content = selected
+            self._run_async(
+                lambda: self.memory_service.update_entry(
+                    entry_id, self.character_id, content
+                ),
+                lambda _result: self._reload(),
+            )
+
+    def _delete_selected(self):
+        selected = self._selected()
+        if selected and QMessageBox.question(
+            self, "删除记忆", "删除后不会再注入后续模型请求。确认删除？"
+        ) == QMessageBox.Yes:
+            entry_id, _content = selected
+            self._run_async(
+                lambda: self.memory_service.delete_entry(entry_id, self.character_id),
+                lambda _result: self._reload(),
+            )
+
+    def _clear_all(self):
+        if QMessageBox.question(
+            self, "清空记忆", "确认清空当前角色的全部记忆？"
+        ) == QMessageBox.Yes:
+            self._run_async(
+                lambda: self.memory_service.clear(self.character_id),
+                lambda _result: self._reload(),
+            )
+
+    def _toggle_enabled(self, checked):
+        self.enabled_button.setText("记忆已启用" if checked else "记忆已关闭")
+        self._run_async(
+            lambda: self.memory_service.set_enabled(self.character_id, checked),
+            lambda _result: self._reload(),
+        )
 
 
 # ============== 对话对话框 ==============
@@ -1936,6 +2082,9 @@ class ChatDialog(QDialog):
         # 对话历史（用于上下文记忆）
         self.message_history = []
         self.request_worker = None
+        self.memory_worker = None
+        self.memory_service = None
+        self.session_id = str(uuid.uuid4())
 
         self.setWindowTitle("💬 和我对话")
         self.setGeometry(300, 300, 580, 500)
@@ -1951,6 +2100,7 @@ class ChatDialog(QDialog):
         """)
 
         self._init_ui()
+        self._restore_memory_async()
     
     def _load_settings(self):
         """加载设置"""
@@ -1964,7 +2114,8 @@ class ChatDialog(QDialog):
         """初始化 UI - 粉紫蓝主题"""
         layout = QVBoxLayout()
 
-        # 标题
+        # 标题与记忆入口
+        title_layout = QHBoxLayout()
         title = QLabel("💬 想对我说...")
         title.setStyleSheet("""
             font-size: 24px;
@@ -1973,7 +2124,13 @@ class ChatDialog(QDialog):
             background-color: transparent;
             padding: 5px 5px;
         """)
-        layout.addWidget(title)
+        title_layout.addWidget(title)
+        title_layout.addStretch()
+        self.memory_button = QPushButton("🧠 记忆")
+        self.memory_button.setEnabled(False)
+        self.memory_button.clicked.connect(self._show_memory_manager)
+        title_layout.addWidget(self.memory_button)
+        layout.addLayout(title_layout)
 
         # 对话历史区域
         self.chat_history = QTextEdit()
@@ -2055,11 +2212,62 @@ class ChatDialog(QDialog):
         """)
         send_btn.clicked.connect(self._send_message)
         self.send_btn = send_btn
+        self.send_btn.setEnabled(False)
         input_layout.addWidget(send_btn)
 
         layout.addLayout(input_layout)
 
         self.setLayout(layout)
+
+    def _load_memory(self):
+        service = SQLiteMemoryService()
+        return service, service.recent_messages(self.model_config.character_id, limit=20)
+
+    def _restore_memory_async(self):
+        self.memory_worker = ApiRequestWorker(self._load_memory, self)
+        self.memory_worker.succeeded.connect(self._on_memory_restored)
+        self.memory_worker.failed.connect(self._on_memory_restore_failed)
+        self.memory_worker.finished.connect(self._finish_memory_restore)
+        self.memory_worker.start()
+
+    def _on_memory_restored(self, result):
+        self.memory_service, entries = result
+        self.message_history = [
+            {"role": entry.role, "content": entry.content} for entry in entries
+        ]
+        for entry in entries:
+            bubble = (
+                self._make_user_bubble(entry.content)
+                if entry.role == "user"
+                else self._make_ai_bubble(entry.content)
+            )
+            self.chat_history.append(bubble)
+        if entries:
+            self.chat_history.append(
+                self._make_ai_bubble("之前聊过的内容，我还记得。")
+            )
+        self.send_btn.setEnabled(True)
+        self.memory_button.setEnabled(True)
+
+    def _on_memory_restore_failed(self, error_message):
+        self.memory_service = NullMemoryService()
+        self.chat_history.append(
+            self._make_error_bubble(f"记忆库暂时不可用：{error_message}")
+        )
+        self.send_btn.setEnabled(True)
+
+    def _finish_memory_restore(self):
+        if self.memory_worker:
+            self.memory_worker.deleteLater()
+            self.memory_worker = None
+
+    def _show_memory_manager(self):
+        if self.memory_service:
+            MemoryDialog(
+                self.memory_service,
+                self.model_config.character_id,
+                self,
+            ).exec_()
 
     def _make_user_bubble(self, text):
         """生成用户消息气泡（右侧，蓝色系）"""
@@ -2112,7 +2320,7 @@ class ChatDialog(QDialog):
     def _send_message(self):
         """发送消息"""
         message = self.input_text.text().strip()
-        if not message:
+        if not message or not self.memory_service:
             return
 
         # 添加用户消息气泡到历史
@@ -2120,7 +2328,8 @@ class ChatDialog(QDialog):
         self.input_text.clear()
         self.send_btn.setEnabled(False)
 
-        # 添加到上下文历史
+        # UI history mirrors persisted history; request context is built in
+        # the worker from SQLite so closing the dialog cannot erase it.
         self.message_history.append({"role": "user", "content": message})
 
         # 使用 AI 以祁煜语气回复（带上下文）
@@ -2146,9 +2355,31 @@ class ChatDialog(QDialog):
             return
 
         client = ModelApiClient(self.model_config, self.api_key)
-        history_snapshot = list(self.message_history)
+
+        def request_with_memory():
+            self.memory_service.add_message(
+                self.model_config.character_id,
+                self.session_id,
+                "user",
+                message,
+            )
+            context = self.memory_service.build_context(
+                self.model_config.character_id,
+                message,
+                qi_yu_prompt,
+                budget_tokens=self.model_config.context_budget_tokens,
+            )
+            result = client.chat(context.system_prompt, context.messages)
+            self.memory_service.add_message(
+                self.model_config.character_id,
+                self.session_id,
+                "assistant",
+                result.reply,
+            )
+            return result, context
+
         self.request_worker = ApiRequestWorker(
-            lambda: client.chat(qi_yu_prompt, history_snapshot),
+            request_with_memory,
             self,
         )
         self.request_worker.succeeded.connect(self._on_chat_success)
@@ -2157,9 +2388,14 @@ class ChatDialog(QDialog):
         self.request_worker.start()
 
     def _on_chat_success(self, result):
-        reply = result.reply
+        chat_result, context = result
+        reply = chat_result.reply
         self.chat_history.append(self._make_ai_bubble(reply))
         self.message_history.append({"role": "assistant", "content": reply})
+        print(
+            f"[MEMORY] injected={list(context.injected_memory_ids)} "
+            f"estimated_tokens={context.estimated_tokens}"
+        )
         if self.parent_window:
             self.parent_window._set_state(PET_STATE_HAPPY)
 
