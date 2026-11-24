@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Debug Pet - 桌面宠物Debugger (PyQt5 版本)
+一切UI以粉色紫红蓝主题背景展示
 """
 
 import sys
@@ -81,13 +82,13 @@ GIF_FILES = {
 
 # 气泡颜色
 STATE_COLORS = {
-    PET_STATE_IDLE: "#D1C4E9",    # 紫色（浅紫）
-    PET_STATE_WALKING: "#CE93D8", # 紫色（稍深紫）
-    PET_STATE_THINKING: "#B3E5FC",# 天蓝色（浅天蓝）
-    PET_STATE_HAPPY: "#F8BBD0",   # 粉色（粉红）
-    PET_STATE_SAD: "#C5CAE9",     # 灰紫色（淡紫灰）
-    PET_STATE_WAITING: "#FFCDD2", # 红色（淡红）
-    PET_STATE_FAILED: "#C5CAE9",  # 灰紫色（同SAD）
+    PET_STATE_IDLE: "#CE93D8",      # 紫粉色
+    PET_STATE_WALKING: "#AB47BC",   # 紫色
+    PET_STATE_THINKING: "#90CAF9",  # 蓝色
+    PET_STATE_HAPPY: "#F48FB1",     # 粉色
+    PET_STATE_SAD: "#9FA8DA",       # 蓝紫色
+    PET_STATE_WAITING: "#EF5350",   # 红色
+    PET_STATE_FAILED: "#E57373",    # 红色系
 }
 
 
@@ -889,12 +890,13 @@ class PetWindow(QWidget):
         print(f"[BUBBLE] 消息: {message[:20]}... | 状态: {state_key} | 颜色: {color}")
         
         self.bubble_label.setStyleSheet(f"""
-            background-color: rgba(255, 255, 255, 0.9);
-            border: 4px solid {color};
-            border-radius: 15px;
-            padding: 10px 15px;
+            background-color: rgba(252, 232, 243, 0.92);
+            border: 3px solid {color};
+            border-radius: 18px;
+            padding: 12px 18px;
             font-size: 24px;
-            color: #333333;
+            font-weight: bold;
+            color: #4A148C;
             font-family: 'Microsoft YaHei UI', 'SimHei';
         """)
         self.bubble_label.setText(message)
@@ -1094,8 +1096,8 @@ class PetWindow(QWidget):
         
         menu.setStyleSheet("""
             QMenu {
-                background-color: rgba(255, 255, 255, 200);
-                border: 2px solid rgba(210, 162, 152, 150);
+                background-color: rgba(252, 232, 243, 235);
+                border: 2px solid #F48FB1;
                 border-radius: 12px;
                 padding: 8px 5px;
             }
@@ -1105,18 +1107,19 @@ class PetWindow(QWidget):
                 border-radius: 8px;
                 margin: 2px 5px;
                 font-size: 22px;
-                color: #333333;
+                color: #4A148C;
             }
             QMenu::item:selected {
-                background-color: rgba(210, 162, 152, 180); 
-                color: #2E7D32;
+                background-color: rgba(244, 143, 177, 220);
+                color: #FFFFFF;
             }
             QMenu::item:disabled {
-                color: #888888;
+                color: #9E9E9E;
+                font-weight: bold;
             }
             QMenu::separator {
                 height: 1px;
-                background-color: rgba(200, 200, 200, 200);
+                background-color: rgba(206, 147, 216, 150);
                 margin: 5px 15px;
             }
         """)
@@ -1190,21 +1193,22 @@ class PetWindow(QWidget):
 
 # ============== 代码检查器对话框 ==============
 class CodeCheckerDialog(QDialog):
-    """代码检查器对话框 - 马卡龙风格"""
+    """代码检查器对话框 - 粉紫蓝主题"""
     
     def __init__(self, parent=None, code_content=None):
         super().__init__(parent)
         self.parent_window = parent
         self.setWindowTitle("🐛 Debug Pet - 代码检查器")
-        self.setGeometry(200, 200, 700, 650)
+        self.setGeometry(200, 200, 750, 700)
         self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
         
-        # 设置窗口整体透明度（半透明效果）border: 2px solid #98D8C8;
-        self.setWindowOpacity(0.92)
+        # 粉紫蓝主题：半透明效果
+        self.setWindowOpacity(0.93)
         
         self.setStyleSheet("""
             QDialog {
-                background-color: #FFF8DC;
+                background-color: rgba(252, 232, 243, 230);
+                border: 2px solid #F8BBD0;
                 border-radius: 15px;
             }
         """)
@@ -1259,10 +1263,10 @@ class CodeCheckerDialog(QDialog):
             self.api_url = "https://api.deepseek.com/chat/completions"
     
     def _init_ui(self):
-        """初始化 UI - 马卡龙风格"""
+        """初始化 UI - 粉紫蓝主题"""
         layout = QVBoxLayout()
         layout.setSpacing(10)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(25, 25, 25, 25)
         
         # 标题区域
         title_frame = QFrame()
@@ -1271,9 +1275,9 @@ class CodeCheckerDialog(QDialog):
         
         title = QLabel("🐛 Debug Pet")
         title.setStyleSheet("""
-            font-size: 24px;
+            font-size: 26px;
             font-weight: bold;
-            color: #5D5D5D;
+            color: #AD1457;
             background-color: transparent;
         """)
         title_layout.addWidget(title)
@@ -1286,7 +1290,7 @@ class CodeCheckerDialog(QDialog):
         code_label.setStyleSheet("""
             font-size: 22px;
             font-weight: bold;
-            color: #666666;
+            color: #6A1B9A;
             background-color: transparent;
         """)
         layout.addWidget(code_label)
@@ -1296,33 +1300,33 @@ class CodeCheckerDialog(QDialog):
         self.code_text.setMinimumHeight(200)
         self.code_text.setStyleSheet("""
             QTextEdit {
-                background-color: white;
-                border: 2px solid #E0E0E0;
-                border-radius: 10px;
-                padding: 15px;
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #CE93D8;
+                border-radius: 12px;
+                padding: 12px;
                 font-family: 'Consolas', 'Microsoft YaHei UI';
                 font-size: 18px;
-                color: #333333;
+                color: #4A148C;
             }
             QTextEdit:focus {
-                border: 2px solid #98D8C8;
+                border: 2px solid #AB47BC;
             }
         """)
         layout.addWidget(self.code_text, 2)
         
-        # 按钮区域 - 马卡龙配色圆角按钮
+        # 按钮区域 - 粉紫蓝主题配色圆角按钮
         btn_frame = QFrame()
         btn_frame.setStyleSheet("background-color: transparent;")
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setSpacing(10)
         
-        # 检查代码按钮 - 薄荷绿
+        # 检查代码按钮 - 粉色
         self.check_btn = QPushButton("🔍 检查代码")
-        self.check_btn.setMinimumSize(120, 40)
+        self.check_btn.setMinimumSize(120, 45)
         self.check_btn.setStyleSheet("""
             QPushButton {
-                background-color: #98D8C8;
-                color: #2E7D32;
+                background-color: #F48FB1;
+                color: white;
                 border: none;
                 border-radius: 12px;
                 padding: 10px 20px;
@@ -1330,22 +1334,22 @@ class CodeCheckerDialog(QDialog):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #7BC5B3;
+                background-color: #EC407A;
             }
             QPushButton:pressed {
-                background-color: #68B4A1;
+                background-color: #C2185B;
             }
         """)
         self.check_btn.clicked.connect(self._check_code)
         btn_layout.addWidget(self.check_btn)
         
-        # 打开文件按钮 - 天蓝色
+        # 打开文件按钮 - 蓝色
         open_btn = QPushButton("📁 打开文件")
-        open_btn.setMinimumSize(120, 40)
+        open_btn.setMinimumSize(120, 45)
         open_btn.setStyleSheet("""
             QPushButton {
-                background-color: #87CEEB;
-                color: #1565C0;
+                background-color: #90CAF9;
+                color: #0D47A1;
                 border: none;
                 border-radius: 12px;
                 padding: 10px 20px;
@@ -1353,22 +1357,22 @@ class CodeCheckerDialog(QDialog):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #6BB3D9;
+                background-color: #64B5F6;
             }
             QPushButton:pressed {
-                background-color: #5A9FC7;
+                background-color: #42A5F5;
             }
         """)
         open_btn.clicked.connect(self._open_file_in_dialog)
         btn_layout.addWidget(open_btn)
         
-        # 清空按钮 - 蜜桃色
+        # 清空按钮 - 紫色
         clear_btn = QPushButton("🗑 清空")
-        clear_btn.setMinimumSize(100, 40)
+        clear_btn.setMinimumSize(130, 45)
         clear_btn.setStyleSheet("""
             QPushButton {
-                background-color: #FFDAB9;
-                color: #C62828;
+                background-color: #CE93D8;
+                color: #4A148C;
                 border: none;
                 border-radius: 12px;
                 padding: 10px 20px;
@@ -1376,10 +1380,12 @@ class CodeCheckerDialog(QDialog):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #FFC7A3;
+                background-color: #AB47BC;
+                color: white;
             }
             QPushButton:pressed {
-                background-color: #FFB48A;
+                background-color: #8E24AA;
+                color: white;
             }
         """)
         clear_btn.clicked.connect(self._clear_all)
@@ -1390,11 +1396,11 @@ class CodeCheckerDialog(QDialog):
         layout.addWidget(btn_frame)
         
         # 错误输出区域
-        error_label = QLabel("❌ 错误列表")
+        error_label = QLabel("💡 分析结果")
         error_label.setStyleSheet("""
             font-size: 22px;
             font-weight: bold;
-            color: #666666;
+            color: #C2185B;
             background-color: transparent;
         """)
         layout.addWidget(error_label)
@@ -1404,13 +1410,13 @@ class CodeCheckerDialog(QDialog):
         self.error_text.setMinimumHeight(150)
         self.error_text.setStyleSheet("""
             QTextEdit {
-                background-color: white;
-                border: 2px solid #E0E0E0;
-                border-radius: 10px;
-                padding: 15px;
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #F48FB1;
+                border-radius: 12px;
+                padding: 12px;
                 font-family: 'Consolas', 'Microsoft YaHei UI';
                 font-size: 18px;
-                color: #E57373;
+                color: #4A148C;
             }
         """)
         layout.addWidget(self.error_text, 1)
@@ -1581,36 +1587,35 @@ class CodeCheckerDialog(QDialog):
 
 # ============== 设置对话框 ==============
 class SettingsDialog(QDialog):
-    """设置对话框"""
-    
+    """设置对话框 - 粉紫蓝主题"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙ 设置")
-        self.setGeometry(300, 300, 400, 350)
+        self.setGeometry(300, 300, 500, 450)
         self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
-        
-        # 设置窗口整体透明度（半透明效果）
-        self.setWindowOpacity(0.92)
-        
+
+        self.setWindowOpacity(0.93)
+
         self.setStyleSheet("""
             QDialog {
-                background-color: #2D2D2D;
-                border: 2px solid #98D8C8;
+                background-color: rgba(252, 232, 243, 230);
+                border: 2px solid #F8BBD0;
                 border-radius: 15px;
             }
         """)
-        
+
         # 加载现有设置
         self._load_settings()
-        
+
         self._init_ui()
-    
+
     def _load_settings(self):
         """加载设置"""
         self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         self.api_url = os.environ.get("API_URL", "https://api.deepseek.com/chat/completions")
         self.ai_service = os.environ.get("AI_SERVICE", "deepseek")
-        
+
         # 从文件加载（使用当前工作目录，方便用户修改）
         settings_file = os.path.join(os.getcwd(), '.debug_pet_settings')
         try:
@@ -1630,194 +1635,216 @@ class SettingsDialog(QDialog):
                             self.ai_service = line.split('=', 1)[1]
         except:
             pass
-        
+
         # 默认值
         if not hasattr(self, 'use_ai'):
             self.use_ai = False
-        
+
         # 默认服务
         if not hasattr(self, 'ai_service'):
             self.ai_service = "deepseek"
-        
+
         # 根据 AI 服务自动设置 API URL
         if self.ai_service == "glm":
             self.api_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         else:
             self.api_url = "https://api.deepseek.com/chat/completions"
-    
+
     def _init_ui(self):
-        """初始化 UI"""
+        """初始化 UI - 粉紫蓝主题"""
         layout = QVBoxLayout()
         layout.setSpacing(15)
         layout.setContentsMargins(25, 25, 25, 25)
-        
-        # 标题区域
-        title_frame = QFrame()
-        title_frame.setStyleSheet("background-color: transparent;")
-        title_layout = QHBoxLayout(title_frame)
-        
+
+        # 标题
         title = QLabel("⚙ 设置")
         title.setStyleSheet("""
-            font-size: 22px;
+            font-size: 26px;
             font-weight: bold;
-            color: #FFFFFF;
+            color: #AD1457;
             background-color: transparent;
+            padding: 5px 0;
         """)
-        title_layout.addWidget(title)
-        title_layout.addStretch()
-        
-        layout.addWidget(title_frame)
-        
-        # API 设置区域
+        layout.addWidget(title)
+
+        # API 设置标题
         api_label = QLabel("🔧 API 设置")
         api_label.setStyleSheet("""
-            font-size: 20px;
+            font-size: 22px;
             font-weight: bold;
-            color: #98D8C8;
+            color: #6A1B9A;
             background-color: transparent;
+            padding: 5px 0;
         """)
         layout.addWidget(api_label)
-        
+
         # AI 服务选择
         service_layout = QHBoxLayout()
         service_label = QLabel("AI 服务:")
-        service_label.setStyleSheet("color: #CCCCCC; background-color: transparent;")
+        service_label.setStyleSheet("color: #4A148C; font-size: 20px; background-color: transparent;")
         service_layout.addWidget(service_label)
-        
+
         self.service_combo = QComboBox()
         self.service_combo.addItems(["DeepSeek", "GLM-4.7-Flash"])
         self.service_combo.setCurrentText("DeepSeek" if self.ai_service == "deepseek" else "GLM-4.7-Flash")
         self.service_combo.setStyleSheet("""
             QComboBox {
-                background-color: rgba(60, 60, 60, 200);
-                border: 1px solid rgba(100, 100, 100, 150);
-                border-radius: 8px;
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #CE93D8;
+                border-radius: 10px;
                 padding: 8px 12px;
-                color: #FFFFFF;
+                color: #4A148C;
                 font-size: 20px;
-                min-width: 150px;
+                min-width: 200px;
+            }
+            QComboBox:hover {
+                border: 2px solid #AB47BC;
             }
             QComboBox::drop-down {
                 border: none;
             }
             QComboBox QAbstractItemView {
-                background-color: rgba(60, 60, 60, 200);
-                border: 1px solid rgba(100, 100, 100, 150);
-                border-radius: 8px;
-                color: #FFFFFF;
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #CE93D8;
+                border-radius: 10px;
+                color: #4A148C;
                 font-size: 20px;
+                padding: 5px;
+                selection-background-color: #F8BBD0;
+                selection-color: #AD1457;
             }
         """)
-        # 当选择改变时，自动更新 API URL
         self.service_combo.currentTextChanged.connect(self._on_service_changed)
         service_layout.addWidget(self.service_combo)
+        service_layout.addStretch()
         layout.addLayout(service_layout)
-        
+
         # API Key
-        api_key_layout = QHBoxLayout()
         api_key_label = QLabel("API Key:")
-        api_key_label.setStyleSheet("color: #CCCCCC; background-color: transparent;")
-        api_key_layout.addWidget(api_key_label)
-        
+        api_key_label.setStyleSheet("color: #4A148C; font-size: 20px; background-color: transparent; padding-top: 5px;")
+        layout.addWidget(api_key_label)
+
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.Password)
         self.api_key_input.setPlaceholderText("输入 API Key (GLM 无需 Key)")
         self.api_key_input.setStyleSheet("""
-            background-color: rgba(60, 60, 60, 200);
-            border: 1px solid rgba(100, 100, 100, 150);
-            border-radius: 8px;
-            padding: 8px 12px;
-            color: #FFFFFF;
-            font-size: 20px;
+            QLineEdit {
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #CE93D8;
+                border-radius: 10px;
+                padding: 10px 15px;
+                color: #4A148C;
+                font-size: 20px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #AB47BC;
+                background-color: rgba(255, 255, 255, 255);
+            }
         """)
         self.api_key_input.setText(self.api_key)
-        api_key_layout.addWidget(self.api_key_input)
-        layout.addLayout(api_key_layout)
-        
+        layout.addWidget(self.api_key_input)
+
         # API URL
-        api_url_layout = QHBoxLayout()
         api_url_label = QLabel("API URL:")
-        api_url_label.setStyleSheet("color: #CCCCCC; background-color: transparent;")
-        api_url_layout.addWidget(api_url_label)
-        
+        api_url_label.setStyleSheet("color: #4A148C; font-size: 20px; background-color: transparent; padding-top: 5px;")
+        layout.addWidget(api_url_label)
+
         self.api_url_input = QLineEdit()
         self.api_url_input.setPlaceholderText("API 端点 URL")
         self.api_url_input.setStyleSheet("""
-            background-color: rgba(60, 60, 60, 200);
-            border: 1px solid rgba(100, 100, 100, 150);
-            border-radius: 8px;
-            padding: 8px 12px;
-            color: #FFFFFF;
-            font-size: 20px;
+            QLineEdit {
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #90CAF9;
+                border-radius: 10px;
+                padding: 10px 15px;
+                color: #1565C0;
+                font-size: 20px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #42A5F5;
+                background-color: rgba(255, 255, 255, 255);
+            }
         """)
         self.api_url_input.setText(self.api_url)
-        api_url_layout.addWidget(self.api_url_input)
-        layout.addLayout(api_url_layout)
-        
+        layout.addWidget(self.api_url_input)
+
         # 使用 AI 开关
         self.use_ai_checkbox = QPushButton("🤖 启用 AI 分析")
         self.use_ai_checkbox.setCheckable(True)
         self.use_ai_checkbox.setChecked(self.use_ai)
         self.use_ai_checkbox.setStyleSheet("""
             QPushButton {
-                background-color: rgba(60, 60, 60, 200);
-                border: 1px solid rgba(100, 100, 100, 150);
-                border-radius: 8px;
+                background-color: rgba(255, 243, 250, 255);
+                border: 2px solid #CE93D8;
+                border-radius: 10px;
                 padding: 10px 15px;
-                color: #FFFFFF;
+                color: #4A148C;
                 font-size: 20px;
                 text-align: left;
+                margin-top: 10px;
+            }
+            QPushButton:hover {
+                border: 2px solid #AB47BC;
+                background-color: rgba(255, 228, 243, 255);
             }
             QPushButton:checked {
-                background-color: rgba(152, 216, 200, 180);
-                color: #2E7D32;
+                background-color: #F8BBD0;
+                color: #AD1457;
+                border: 2px solid #EC407A;
             }
         """)
         layout.addWidget(self.use_ai_checkbox)
-        
+
         layout.addStretch()
-        
+
         # 按钮区域
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(15)
-        
+
         cancel_btn = QPushButton("取消")
-        cancel_btn.setMinimumSize(100, 40)
+        cancel_btn.setMinimumSize(120, 45)
         cancel_btn.setStyleSheet("""
             QPushButton {
-                background-color: rgba(80, 80, 80, 200);
-                color: #FFFFFF;
+                background-color: #BBDEFB;
+                color: #1565C0;
                 border: none;
-                border-radius: 10px;
+                border-radius: 12px;
                 padding: 10px 20px;
-                font-size: 20px;
+                font-size: 22px;
+                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: rgba(100, 100, 100, 200);
+                background-color: #90CAF9;
+            }
+            QPushButton:pressed {
+                background-color: #64B5F6;
             }
         """)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
-        
+
         save_btn = QPushButton("保存")
-        save_btn.setMinimumSize(100, 40)
+        save_btn.setMinimumSize(120, 45)
         save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #98D8C8;
-                color: #2E7D32;
+                background-color: #F48FB1;
+                color: #FFFFFF;
                 border: none;
-                border-radius: 10px;
+                border-radius: 12px;
                 padding: 10px 20px;
-                font-size: 20px;
+                font-size: 22px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #7BC5B3;
+                background-color: #EC407A;
+            }
+            QPushButton:pressed {
+                background-color: #C2185B;
             }
         """)
         save_btn.clicked.connect(self._save_settings)
         btn_layout.addWidget(save_btn)
-        
+
         layout.addLayout(btn_layout)
         self.setLayout(layout)
     
@@ -1868,17 +1895,26 @@ class ChatDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
-        
+
         # 加载设置
         self._load_settings()
-        
+
         # 对话历史（用于上下文记忆）
         self.message_history = []
-        
+
         self.setWindowTitle("💬 和我对话")
-        self.setGeometry(300, 300, 550, 450)
-        self.setWindowOpacity(0.92)
-        
+        self.setGeometry(300, 300, 580, 500)
+        self.setWindowOpacity(0.93)
+
+        # 粉紫蓝主题背景
+        self.setStyleSheet("""
+            QDialog {
+                background-color: rgba(252, 232, 243, 230);
+                border: 2px solid #F8BBD0;
+                border-radius: 15px;
+            }
+        """)
+
         self._init_ui()
     
     def _load_settings(self):
@@ -1917,105 +1953,169 @@ class ChatDialog(QDialog):
             self.api_url = "https://api.deepseek.com/chat/completions"
     
     def _init_ui(self):
-        """初始化 UI"""
+        """初始化 UI - 粉紫蓝主题"""
         layout = QVBoxLayout()
-        
+
         # 标题
         title = QLabel("💬 想对我说...")
         title.setStyleSheet("""
-            font-size: 22px;
+            font-size: 24px;
             font-weight: bold;
-            color: #5D5D5D;
+            color: #AD1457;
             background-color: transparent;
+            padding: 5px 5px;
         """)
         layout.addWidget(title)
-        
+
         # 对话历史区域
         self.chat_history = QTextEdit()
         self.chat_history.setReadOnly(True)
-        self.chat_history.setMinimumHeight(200)
+        self.chat_history.setMinimumHeight(250)
         self.chat_history.setStyleSheet("""
             QTextEdit {
-                background-color: rgba(255, 250, 240, 200);
-                border: 2px solid #E0E0E0;
-                border-radius: 10px;
-                padding: 10px;
+                background-color: rgba(252, 228, 236, 220);
+                border: 2px solid #F8BBD0;
+                border-radius: 15px;
+                padding: 12px;
                 font-family: 'Microsoft YaHei UI', 'SimHei';
                 font-size: 20px;
                 color: #333333;
             }
         """)
-        self.chat_history.append("<span style='color:#5D4037;'>祁煜:</span> 你来了，我一直在等你...")
+        # 欢迎消息 - 祁煜气泡
+        welcome_html = '''
+        <div style="margin: 6px 0;">
+          <div style="display: flex; align-items: flex-start;">
+            <span style="font-size: 20px;">💕</span>
+            <div style="margin-left: 8px; background-color: rgba(240, 204, 228, 230);
+                        border: 2px solid #F48FB1; border-radius: 15px;
+                        padding: 10px 14px; color: #5D4037; font-size: 20px;
+                        max-width: 80%;">
+              你来了，我一直在等你……
+            </div>
+          </div>
+        </div>
+        '''
+        self.chat_history.append(welcome_html.strip())
         layout.addWidget(self.chat_history, 2)
-        
+
         # 输入区域
         input_layout = QHBoxLayout()
-        
+
         self.input_text = QLineEdit()
         self.input_text.setPlaceholderText("输入你想说的话...")
         self.input_text.setStyleSheet("""
             QLineEdit {
-                background-color: white;
-                border: 2px solid #E0E0E0;
-                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 230);
+                border: 2px solid #CE93D8;
+                border-radius: 12px;
                 padding: 10px 15px;
                 font-family: 'Microsoft YaHei UI', 'SimHei';
                 font-size: 20px;
                 color: #333333;
             }
             QLineEdit:focus {
-                border: 2px solid #98D8C8;
+                border: 2px solid #AB47BC;
+                background-color: rgba(255, 243, 250, 255);
             }
         """)
         self.input_text.returnPressed.connect(self._send_message)
         input_layout.addWidget(self.input_text)
-        
+
         send_btn = QPushButton("发送")
-        send_btn.setMinimumSize(80, 40)
+        send_btn.setMinimumSize(100, 45)
         send_btn.setStyleSheet("""
             QPushButton {
-                background-color: #98D8C8;
-                color: #2E7D32;
+                background-color: #F48FB1;
+                color: #FFFFFF;
                 border: none;
-                border-radius: 8px;
-                padding: 10px 15px;
-                font-size: 20px;
+                border-radius: 12px;
+                padding: 10px 20px;
+                font-size: 22px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #7BC5B3;
+                background-color: #EC407A;
             }
             QPushButton:pressed {
-                background-color: #6AB4A2;
+                background-color: #C2185B;
             }
             QPushButton:disabled {
-                background-color: #C0C0C0;
-                color: #808080;
+                background-color: #E0E0E0;
+                color: #9E9E9E;
             }
         """)
         send_btn.clicked.connect(self._send_message)
         self.send_btn = send_btn
         input_layout.addWidget(send_btn)
-        
+
         layout.addLayout(input_layout)
-        
+
         self.setLayout(layout)
-    
+
+    def _make_user_bubble(self, text):
+        """生成用户消息气泡（右侧，蓝色系）"""
+        return '''
+        <div style="margin: 6px 0;">
+          <div style="display: flex; align-items: flex-start; flex-direction: row-reverse;">
+            <span style="font-size: 20px;">🌸</span>
+            <div style="margin-right: 8px; background-color: rgba(179, 229, 252, 235);
+                        border: 2px solid #64B5F6; border-radius: 15px;
+                        padding: 10px 14px; color: #0D47A1; font-size: 20px;
+                        max-width: 80%;">
+              {text}
+            </div>
+          </div>
+        </div>
+        '''.format(text=text)
+
+    def _make_ai_bubble(self, text):
+        """生成祁煜消息气泡（左侧，粉紫色系）"""
+        return '''
+        <div style="margin: 6px 0;">
+          <div style="display: flex; align-items: flex-start;">
+            <span style="font-size: 20px;">💕</span>
+            <div style="margin-left: 8px; background-color: rgba(240, 204, 228, 230);
+                        border: 2px solid #F48FB1; border-radius: 15px;
+                        padding: 10px 14px; color: #5D4037; font-size: 20px;
+                        max-width: 80%;">
+              {text}
+            </div>
+          </div>
+        </div>
+        '''.format(text=text)
+
+    def _make_error_bubble(self, text):
+        """生成错误消息气泡（左侧，红色系）"""
+        return '''
+        <div style="margin: 6px 0;">
+          <div style="display: flex; align-items: flex-start;">
+            <span style="font-size: 20px;">💢</span>
+            <div style="margin-left: 8px; background-color: rgba(255, 205, 210, 235);
+                        border: 2px solid #EF5350; border-radius: 15px;
+                        padding: 10px 14px; color: #B71C1C; font-size: 20px;
+                        max-width: 80%;">
+              {text}
+            </div>
+          </div>
+        </div>
+        '''.format(text=text)
+
     def _send_message(self):
         """发送消息"""
         message = self.input_text.text().strip()
         if not message:
             return
-        
-        # 添加用户消息到历史
-        self.chat_history.append(f"<span style='color:#1565C0;'>你:</span> {message}")
+
+        # 添加用户消息气泡到历史
+        self.chat_history.append(self._make_user_bubble(message))
         self.input_text.clear()
         self.send_btn.setEnabled(False)
-        
+
         # 添加到上下文历史
         self.message_history.append({"role": "user", "content": message})
-        
-        # 使用 GLM 以祁煜语气回复（带上下文）
+
+        # 使用 AI 以祁煜语气回复（带上下文）
         self._get_qi_yu_response(message)
     
     def _load_qi_yu_prompt(self):
@@ -2032,7 +2132,7 @@ class ChatDialog(QDialog):
     def _get_qi_yu_response(self, message):
         """获取祁煜风格的回复"""
         if not requests:
-            self.chat_history.append("<span style='color:#D32F2F;'>祁煜:</span> 抱歉，我现在无法回应...")
+            self.chat_history.append(self._make_error_bubble("抱歉，我现在无法回应……"))
             self.send_btn.setEnabled(True)
             return
         
@@ -2049,7 +2149,7 @@ class ChatDialog(QDialog):
             
             qi_yu_prompt = self._load_qi_yu_prompt()
             if not qi_yu_prompt:
-                self.chat_history.append("<span style='color:#D32F2F;'>祁煜:</span> 我的剧本好像丢了...")
+                self.chat_history.append(self._make_error_bubble("我的剧本好像丢了……"))
                 self.send_btn.setEnabled(True)
                 return
             
@@ -2057,7 +2157,7 @@ class ChatDialog(QDialog):
                 "model": model,
                 "messages": [
                     {"role": "system", "content": qi_yu_prompt}
-                ] + self.message_history[-20:] + [
+                ] + self.message_history[-30:] + [
                     {"role": "user", "content": message}
                 ],
                 "temperature": 0.7
@@ -2069,8 +2169,8 @@ class ChatDialog(QDialog):
                 result = response.json()
                 reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 
-                # 添加回复到历史
-                self.chat_history.append(f"<span style='color:#5D4037;'>祁煜:</span> {reply}")
+                # 添加 AI 回复气泡到历史
+                self.chat_history.append(self._make_ai_bubble(reply))
                 
                 # 添加到上下文历史
                 self.message_history.append({"role": "assistant", "content": reply})
@@ -2079,11 +2179,11 @@ class ChatDialog(QDialog):
                 if self.parent_window:
                     self.parent_window._set_state(PET_STATE_HAPPY)
             else:
-                self.chat_history.append(f"<span style='color:#D32F2F;'>祁煜:</span> 信号不太好，我听不清楚...")
+                self.chat_history.append(self._make_error_bubble("信号不太好，我听不清楚……"))
         except requests.exceptions.Timeout:
-            self.chat_history.append("<span style='color:#D32F2F;'>祁煜:</span> 深海信号延迟了，稍后再试...")
+            self.chat_history.append(self._make_error_bubble("深海信号延迟了，稍后再试……"))
         except Exception as e:
-            self.chat_history.append(f"<span style='color:#D32F2F;'>祁煜:</span> 抱歉，我现在无法回应...")
+            self.chat_history.append(self._make_error_bubble("抱歉，我现在无法回应……"))
         
         self.send_btn.setEnabled(True)
 
