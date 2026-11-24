@@ -16,11 +16,18 @@ import uuid
 from datetime import datetime
 
 from debugpet.services.api import ModelApiClient
+from debugpet.services.behavior import BehaviorState, DiagnosticBehavior
 from debugpet.services.config import ConfigService, ModelConfig
 from debugpet.services.diagnostics import DiagnosticEvent, DiagnosticGate, Severity
 from debugpet.services.ipc import DiagnosticIpcServer
 from debugpet.services.memory import NullMemoryService, SQLiteMemoryService
-from debugpet.services.window_locator import find_vscode_anchor
+from debugpet.services.visual_locator import locate_vscode_decoration
+from debugpet.services.window_locator import (
+    enable_per_monitor_dpi_awareness,
+    find_vscode_anchor,
+    find_vscode_window,
+    is_foreground_window,
+)
 from debugpet.services.workers import ApiRequestWorker
 
 # PyQt5 导入
@@ -140,6 +147,10 @@ class PetWindow(QWidget):
         # VSCode diagnostics use authenticated loopback IPC. No source is
         # required for the local reaction path.
         self.diagnostic_gate = DiagnosticGate()
+        self.diagnostic_behavior = DiagnosticBehavior()
+        self.locator_worker = None
+        self.current_diagnostic = None
+        self.resolution_timers = {}
         self.ipc_server = DiagnosticIpcServer(parent=self)
         self.ipc_server.diagnostic_received.connect(self._on_diagnostic_event)
         self.ipc_server.protocol_error.connect(
@@ -159,11 +170,13 @@ class PetWindow(QWidget):
             Qt.Window | 
             Qt.FramelessWindowHint |  # 无边框
             Qt.WindowStaysOnTopHint |   # 置顶
-            Qt.Tool                    # 不在任务栏显示
+            Qt.Tool |                  # 不在任务栏显示
+            Qt.WindowDoesNotAcceptFocus
         )
         
         # 设置透明背景（关键！）
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         
         # 设置窗口大小和位置
         self.setGeometry(self.pet_x, self.pet_y, self.pet_width, self.pet_height)
@@ -186,9 +199,11 @@ class PetWindow(QWidget):
         self.bubble_window.setWindowFlags(
             Qt.FramelessWindowHint |
             Qt.WindowStaysOnTopHint |
-            Qt.Tool
+            Qt.Tool |
+            Qt.WindowDoesNotAcceptFocus
         )
         self.bubble_window.setAttribute(Qt.WA_TranslucentBackground)
+        self.bubble_window.setAttribute(Qt.WA_ShowWithoutActivating, True)
         
         self.bubble_label = QLabel(self.bubble_window)
         self.bubble_label.setAlignment(Qt.AlignCenter)
@@ -520,6 +535,8 @@ class PetWindow(QWidget):
     
     def _check_waiting(self):
         """检查是否显示等待动画"""
+        if self._diagnostic_busy():
+            return
         if self.current_state != PET_STATE_IDLE:
             return
         
@@ -547,6 +564,9 @@ class PetWindow(QWidget):
     
     def _random_action(self):
         """随机动作"""
+        if self._diagnostic_busy():
+            self._schedule_next_action()
+            return
         # 如果正在移动或拖拽，不执行任何动作
         if self.is_moving or self.is_dragging:
             self._schedule_next_action()
@@ -614,6 +634,8 @@ class PetWindow(QWidget):
             self._clamp_position()
             self.move(self.pet_x, self.pet_y)
             self._set_state(PET_STATE_IDLE)
+            if self.diagnostic_behavior.state == BehaviorState.NAVIGATE:
+                self._on_navigation_arrived()
             return
         
         # 移动
@@ -682,6 +704,12 @@ class PetWindow(QWidget):
             )
 
     def _on_diagnostic_event(self, payload):
+        print(
+            f"[IPC] received uri={payload.get('uri')} line={payload.get('line')} "
+            f"removed={payload.get('removed')} active={payload.get('active')} "
+            f"visible={payload.get('visible')} locate={payload.get('locate')}",
+            flush=True,
+        )
         try:
             event = DiagnosticEvent(
                 uri=str(payload["uri"]),
@@ -697,26 +725,171 @@ class PetWindow(QWidget):
         except (KeyError, TypeError, ValueError):
             print("[IPC] invalid diagnostic payload")
             return
+
+        identity = event.identity
+        active = bool(payload.get("active", False))
+        visible = bool(payload.get("visible", False))
+        locate_requested = bool(payload.get("locate", False))
+
+        if not active:
+            if self.diagnostic_behavior.task and self.diagnostic_behavior.task.identity == identity:
+                self._cancel_navigation("editor-switched")
+            return
+        current_task = self.diagnostic_behavior.task
+        if (
+            not event.removed
+            and current_task
+            and current_task.identity == identity
+            and current_task.state not in {
+                BehaviorState.CANCELLED,
+                BehaviorState.CELEBRATE,
+            }
+        ):
+            return
+        if not event.removed and (not visible or not locate_requested):
+            print(f"[NAV] passive diagnostic: visible={visible} locate={locate_requested}")
+            return
         if not self.diagnostic_gate.accept(event):
             return
 
         self.last_interaction_time = datetime.now()
         if event.removed:
+            self._schedule_resolution_confirmation(event)
+            return
+
+        self._cancel_resolution_confirmation(event.uri)
+
+        self._cancel_navigation("superseded")
+        self.diagnostic_behavior.detect(identity)
+        self.diagnostic_behavior.locating()
+        self.current_diagnostic = (event, dict(payload))
+        self.locator_worker = ApiRequestWorker(
+            lambda: self._locate_diagnostic_target(payload), self
+        )
+        self.locator_worker.succeeded.connect(
+            lambda result, expected=identity: self._on_target_located(expected, result)
+        )
+        self.locator_worker.failed.connect(
+            lambda error: print(f"[NAV] locate failed: {error}")
+        )
+        self.locator_worker.finished.connect(self._finish_locator_worker)
+        self.locator_worker.start()
+
+    def _locate_diagnostic_target(self, payload):
+        document_name = str(payload.get("document_name", ""))
+        window = find_vscode_window(document_name)
+        if window:
+            if not is_foreground_window(window):
+                return {
+                    "target": None,
+                    "precise": False,
+                    "reason": "target VSCode window is not foreground",
+                }
+            marker = locate_vscode_decoration(window)
+            if marker:
+                # Place the pet beside, never over, the diagnostic marker.
+                if marker.x - window.left > self.pet_width + 40:
+                    target_x = marker.x - self.pet_width - 24
+                else:
+                    target_x = marker.x + 40
+                target_y = marker.y - self.pet_height // 2
+                return {
+                    "target": (target_x, target_y),
+                    "precise": True,
+                    "marker": (marker.x, marker.y),
+                    "confidence": marker.confidence,
+                }
+        fallback = find_vscode_anchor(document_name)
+        return {
+            "target": fallback,
+            "precise": False,
+            "reason": "decoration marker not found",
+        }
+
+    def _on_target_located(self, expected_identity, result):
+        task = self.diagnostic_behavior.task
+        if not task or task.identity != expected_identity or task.state != BehaviorState.LOCATE:
+            return
+        target = result.get("target")
+        if not target:
+            self._cancel_navigation("no-window-target")
+            return
+        self.diagnostic_behavior.navigate(tuple(target), precise=bool(result.get("precise")))
+        print(
+            f"[NAV] target={target} precise={result.get('precise')} "
+            f"reason={result.get('reason', '')}"
+        )
+        self._move_to_target(*target)
+
+    def _finish_locator_worker(self):
+        if self.locator_worker:
+            self.locator_worker.deleteLater()
+            self.locator_worker = None
+
+    def _on_navigation_arrived(self):
+        task = self.diagnostic_behavior.task
+        if not task or not self.current_diagnostic:
+            return
+        event, _payload = self.current_diagnostic
+        self.diagnostic_behavior.arrived()
+        self.diagnostic_behavior.report()
+        severity_name = "错误" if event.severity == Severity.ERROR else "警告"
+        location = f"第 {event.line + 1} 行，第 {event.character + 1} 列"
+        prefix = "我找到这里了" if task.precise else "没识别到精确字段，先到编辑器旁边提醒你"
+        self._set_state(
+            PET_STATE_SAD if event.severity == Severity.ERROR else PET_STATE_THINKING
+        )
+        self._update_bubble(
+            f"{prefix}：{location}的{severity_name}——{event.message}",
+            PET_STATE_SAD if event.severity == Severity.ERROR else PET_STATE_THINKING,
+        )
+        self.diagnostic_behavior.wait()
+
+    def _cancel_navigation(self, reason):
+        if self.diagnostic_behavior.cancel(reason):
+            self.is_moving = False
+            print(f"[NAV] cancelled: {reason}")
+
+    def _schedule_resolution_confirmation(self, event):
+        task = self.diagnostic_behavior.task
+        if not task or task.identity != event.identity:
+            return
+        self._cancel_resolution_confirmation(event.uri)
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(
+            lambda identity=event.identity, uri=event.uri: self._confirm_resolution(
+                identity, uri
+            )
+        )
+        self.resolution_timers[event.uri] = timer
+        timer.start(500)
+
+    def _cancel_resolution_confirmation(self, uri):
+        timer = self.resolution_timers.pop(uri, None)
+        if timer:
+            timer.stop()
+            timer.deleteLater()
+
+    def _confirm_resolution(self, identity, uri):
+        timer = self.resolution_timers.pop(uri, None)
+        if timer:
+            timer.deleteLater()
+        if self.diagnostic_behavior.celebrate(identity):
             self.is_moving = False
             self._set_state(PET_STATE_HAPPY)
             self._update_bubble("修好了！这次值得庆祝一下。", PET_STATE_HAPPY)
             QTimer.singleShot(4500, lambda: self._set_state(PET_STATE_IDLE))
-            return
 
-        anchor = find_vscode_anchor()
-        if anchor:
-            self._move_to_target(*anchor)
-        severity_name = "错误" if event.severity == Severity.ERROR else "警告"
-        line_number = event.line + 1
-        self._update_bubble(
-            f"第 {line_number} 行有个{severity_name}：{event.message}",
-            PET_STATE_SAD if event.severity == Severity.ERROR else PET_STATE_THINKING,
-        )
+    def _diagnostic_busy(self):
+        return self.diagnostic_behavior.state in {
+            BehaviorState.DETECT,
+            BehaviorState.LOCATE,
+            BehaviorState.NAVIGATE,
+            BehaviorState.ARRIVE,
+            BehaviorState.REPORT,
+            BehaviorState.WAIT,
+        }
     
     def _init_qi_yu_quotes(self):
         """初始化祁煜语录列表"""
@@ -804,6 +977,9 @@ class PetWindow(QWidget):
     
     def _say_random_quote(self):
         """随机说出一句祁煜语录"""
+        if self._diagnostic_busy():
+            self._schedule_say_quote()
+            return
         # 检查无互动时间
         now = datetime.now()
         idle_time = (now - self.last_interaction_time).total_seconds()
@@ -842,6 +1018,8 @@ class PetWindow(QWidget):
     
     def _greet_on_start(self):
         """启动时打招呼"""
+        if self._diagnostic_busy():
+            return
         time_period = self._get_time_period()
         greetings = {
             'morning': ['早啊，某位喜欢赖床的保镖小姐。', '早安，我的宝贝。'],
@@ -1048,6 +1226,7 @@ class PetWindow(QWidget):
     def mousePressEvent(self, event):
         """鼠标按下事件"""
         if event.button() == Qt.LeftButton:
+            self._cancel_navigation("pet-dragged")
             self.is_dragging = True
             self.drag_start_x = event.globalX()
             self.drag_start_y = event.globalY()
@@ -2413,6 +2592,7 @@ class ChatDialog(QDialog):
 
 # ============== 主程序 ==============
 def main():
+    enable_per_monitor_dpi_awareness()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     

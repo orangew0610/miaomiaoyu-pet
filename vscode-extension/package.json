@@ -4,17 +4,32 @@
   "description": "Send local VSCode diagnostics to DebugPet without uploading source code.",
   "version": "0.2.0",
   "publisher": "debugpet-local",
-  "engines": { "vscode": "^1.90.0" },
-  "categories": ["Other", "Linters"],
-  "activationEvents": ["onStartupFinished"],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
+  "extensionKind": [
+    "ui"
+  ],
   "contributes": {
     "configuration": {
       "title": "DebugPet",
       "properties": {
         "debugpet.minimumSeverity": {
           "type": "string",
-          "enum": ["error", "warning", "information", "hint"],
+          "enum": [
+            "error",
+            "warning",
+            "information",
+            "hint"
+          ],
           "default": "warning",
           "description": "Least severe diagnostic sent to the local DebugPet process."
         },
@@ -33,6 +48,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.1.1",
     "typescript": "^5.6.0"
   }
 }

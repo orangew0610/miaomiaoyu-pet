@@ -2,15 +2,43 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 
 
-def find_vscode_anchor() -> tuple[int, int] | None:
-    """Return a safe desktop-pet target near a visible VSCode window edge."""
+@dataclass(frozen=True, slots=True)
+class WindowRect:
+    left: int
+    top: int
+    right: int
+    bottom: int
+    title: str
+    hwnd: int = 0
 
+    @property
+    def width(self) -> int:
+        return max(0, self.right - self.left)
+
+    @property
+    def height(self) -> int:
+        return max(0, self.bottom - self.top)
+
+
+def enable_per_monitor_dpi_awareness() -> bool:
+    """Opt the process into per-monitor-v2 coordinates before QApplication."""
     if not hasattr(ctypes, "windll"):
-        return None
+        return False
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+        return bool(ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)))
+    except (AttributeError, OSError):
+        return False
+
+
+def list_vscode_windows() -> list[WindowRect]:
+    if not hasattr(ctypes, "windll"):
+        return []
     user32 = ctypes.windll.user32
-    candidates: list[tuple[int, int, int, int]] = []
+    candidates: list[WindowRect] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     def callback(hwnd, _lparam):
@@ -25,14 +53,37 @@ def find_vscode_anchor() -> tuple[int, int] | None:
             return True
         rect = wintypes.RECT()
         if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            candidates.append((rect.left, rect.top, rect.right, rect.bottom))
+            item = WindowRect(
+                rect.left, rect.top, rect.right, rect.bottom, title.value, int(hwnd)
+            )
+            if item.width > 0 and item.height > 0:
+                candidates.append(item)
         return True
 
     user32.EnumWindows(callback, 0)
-    if not candidates:
+    return candidates
+
+
+def find_vscode_window(document_name: str | None = None) -> WindowRect | None:
+    windows = list_vscode_windows()
+    if document_name:
+        lowered = document_name.lower()
+        matches = [item for item in windows if lowered in item.title.lower()]
+        if matches:
+            windows = matches
+    if not windows:
         return None
-    left, top, right, bottom = max(
-        candidates,
-        key=lambda rect: max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1]),
-    )
-    return max(left, right - 320), max(top, bottom - 340)
+    return max(windows, key=lambda item: item.width * item.height)
+
+
+def is_foreground_window(window: WindowRect) -> bool:
+    if not window.hwnd or not hasattr(ctypes, "windll"):
+        return False
+    return int(ctypes.windll.user32.GetForegroundWindow()) == window.hwnd
+
+
+def find_vscode_anchor(document_name: str | None = None) -> tuple[int, int] | None:
+    window = find_vscode_window(document_name)
+    if not window:
+        return None
+    return max(window.left, window.right - 320), max(window.top, window.bottom - 340)
