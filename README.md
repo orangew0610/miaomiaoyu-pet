@@ -33,6 +33,10 @@ python -m pip install -r requirements-dev.txt
 python debug_pet_pyqt.py
 ```
 
+### 多显示器
+
+桌宠支持 Windows“扩展这些显示器”模式，包括位于主屏左侧、右侧或上方的负坐标屏幕。随机活动会从所有显示器选择目标；拖拽、跳跃、抛物线、气泡和 VSCode 诊断导航均使用虚拟桌面坐标。显示器排列或工作区变化会在下一次移动时重新读取，无需在配置中写死分辨率。
+
 ## 测试
 
 ```powershell

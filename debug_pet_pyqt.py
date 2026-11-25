@@ -21,6 +21,7 @@ from debugpet.services.config import ConfigService, ModelConfig
 from debugpet.services.diagnostics import DiagnosticEvent, DiagnosticGate, Severity
 from debugpet.services.ipc import DiagnosticIpcServer
 from debugpet.services.memory import NullMemoryService, SQLiteMemoryService
+from debugpet.services.screens import DesktopRect, clamp_window, nearest_rect, union_rects
 from debugpet.services.visual_locator import locate_vscode_decoration
 from debugpet.services.window_locator import (
     enable_per_monitor_dpi_awareness,
@@ -583,25 +584,58 @@ class PetWindow(QWidget):
         
         self._schedule_next_action()
     
+    @staticmethod
+    def _screen_rect(screen):
+        geometry = screen.availableGeometry()
+        return DesktopRect(
+            geometry.left(), geometry.top(), geometry.right(), geometry.bottom()
+        )
+
+    def _desktop_rects(self):
+        return [self._screen_rect(screen) for screen in QApplication.screens()]
+
+    def _screen_for_position(self, x=None, y=None, width=None, height=None):
+        x = int(self.pet_x if x is None else x)
+        y = int(self.pet_y if y is None else y)
+        width = self.pet_width if width is None else width
+        height = self.pet_height if height is None else height
+        point = QPoint(x + width // 2, y + height // 2)
+        screen = QApplication.screenAt(point)
+        if screen:
+            return screen
+        closest = nearest_rect(self._desktop_rects(), point.x(), point.y())
+        if closest:
+            for candidate in QApplication.screens():
+                if self._screen_rect(candidate) == closest:
+                    return candidate
+        return QApplication.primaryScreen()
+
+    def _clamp_to_virtual_desktop(self, x, y):
+        bounds = union_rects(self._desktop_rects())
+        if not bounds:
+            return int(x), int(y)
+        return clamp_window(x, y, self.pet_width, self.pet_height, bounds)
+
     def _start_random_walk(self):
         """开始随机走动"""
-        screen = QApplication.primaryScreen()
-        if not screen:
+        screens = QApplication.screens()
+        if not screens:
             return
-        
-        screen_geo = screen.geometry()
-        screen_width = screen_geo.width()
-        screen_height = screen_geo.height()
+
+        # Pick from every monitor so autonomous activity can visit extensions.
+        screen_geo = random.choice(screens).availableGeometry()
         
         # 随机选择目标位置
         margin = 50
         self.target_x = random.randint(
             screen_geo.left() + margin,
-            screen_geo.left() + screen_width - self.pet_width - margin,
+            max(screen_geo.left() + margin,
+                screen_geo.right() - self.pet_width - margin + 1),
         )
         self.target_y = random.randint(
             screen_geo.top() + margin,
-            screen_geo.top() + screen_height - self.pet_height - margin,
+            max(screen_geo.top() + margin,
+                screen_geo.bottom() - self.pet_height - margin + 1),
         )
         
         # 设置方向并更新动画状态
@@ -662,18 +696,9 @@ class PetWindow(QWidget):
     
     def _clamp_position(self):
         """限制宠物位置在屏幕内"""
-        screen = QApplication.screenAt(QPoint(int(self.pet_x), int(self.pet_y)))
-        screen = screen or QApplication.primaryScreen()
-        if screen:
-            screen_geo = screen.availableGeometry()
-            self.pet_x = int(max(
-                screen_geo.left(),
-                min(self.pet_x, screen_geo.right() - self.pet_width + 1),
-            ))
-            self.pet_y = int(max(
-                screen_geo.top(),
-                min(self.pet_y, screen_geo.bottom() - self.pet_height + 1),
-            ))
+        self.pet_x, self.pet_y = self._clamp_to_virtual_desktop(
+            self.pet_x, self.pet_y
+        )
 
     def _move_to_target(self, x, y):
         """Move toward an externally supplied screen target."""
@@ -690,17 +715,15 @@ class PetWindow(QWidget):
         self._move_step()
 
     def _clamp_target(self):
-        screen = QApplication.screenAt(QPoint(self.target_x, self.target_y))
-        screen = screen or QApplication.primaryScreen()
+        screen = self._screen_for_position(self.target_x, self.target_y)
         if screen:
             geometry = screen.availableGeometry()
-            self.target_x = max(
-                geometry.left(),
-                min(self.target_x, geometry.right() - self.pet_width + 1),
-            )
-            self.target_y = max(
-                geometry.top(),
-                min(self.target_y, geometry.bottom() - self.pet_height + 1),
+            self.target_x, self.target_y = clamp_window(
+                self.target_x,
+                self.target_y,
+                self.pet_width,
+                self.pet_height,
+                self._screen_rect(screen),
             )
 
     def _on_diagnostic_event(self, payload):
@@ -1045,12 +1068,11 @@ class PetWindow(QWidget):
         if self.is_moving or self.is_dragging:
             return
         
-        screen = QApplication.primaryScreen()
+        screen = self._screen_for_position()
         if not screen:
             return
         
-        screen_geo = screen.geometry()
-        screen_height = screen_geo.height()
+        screen_geo = screen.availableGeometry()
         
         print(f"[JUMP] 开始跳跃 from ({self.pet_x}, {self.pet_y}), direction={self.walk_direction}")
         
@@ -1061,7 +1083,7 @@ class PetWindow(QWidget):
         self._jump_start_x = self.pet_x
         self._jump_start_y = self.pet_y
         # 跳跃终点落到屏幕底部
-        self._jump_end_y = screen_height - self.pet_height
+        self._jump_end_y = screen_geo.bottom() - self.pet_height + 1
         self.is_moving = True
         
         # 根据方向设置目标
@@ -1139,11 +1161,7 @@ class PetWindow(QWidget):
         y = data['start_y'] + (data['end_y'] - data['start_y']) * t + (1 - abs(2*t - 1)) * data['height_offset']
         
         # 边界检查
-        screen = QApplication.primaryScreen()
-        if screen:
-            screen_geo = screen.geometry()
-            x = max(0, min(x, screen_geo.width() - self.pet_width))
-            y = max(0, min(y, screen_geo.height() - self.pet_height))
+        x, y = self._clamp_to_virtual_desktop(x, y)
         
         self.pet_x = int(x)
         self.pet_y = int(y)
@@ -1189,11 +1207,14 @@ class PetWindow(QWidget):
         bubble_y = int(self.pet_y) - label_height - 20
         
         # 边界检查
-        screen = QApplication.primaryScreen()
+        screen = self._screen_for_position(
+            bubble_x, bubble_y, label_width, label_height
+        )
         if screen:
-            screen_geo = screen.geometry()
-            bubble_x = max(0, min(bubble_x, screen_geo.width() - label_width))
-            bubble_y = max(0, min(bubble_y, screen_geo.height() - label_height))
+            bubble_x, bubble_y = clamp_window(
+                bubble_x, bubble_y, label_width, label_height,
+                self._screen_rect(screen),
+            )
         
         self.bubble_window.setGeometry(bubble_x, bubble_y, label_width, label_height)
         self.bubble_label.setGeometry(0, 0, label_width, label_height)
@@ -1214,11 +1235,14 @@ class PetWindow(QWidget):
             bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
             bubble_y = int(self.pet_y) - label_height - 20
             
-            screen = QApplication.primaryScreen()
+            screen = self._screen_for_position(
+                bubble_x, bubble_y, label_width, label_height
+            )
             if screen:
-                screen_geo = screen.geometry()
-                bubble_x = max(0, min(bubble_x, screen_geo.width() - label_width))
-                bubble_y = max(0, min(bubble_y, screen_geo.height() - label_height))
+                bubble_x, bubble_y = clamp_window(
+                    bubble_x, bubble_y, label_width, label_height,
+                    self._screen_rect(screen),
+                )
             
             self.bubble_window.move(bubble_x, bubble_y)
     
@@ -1297,11 +1321,9 @@ class PetWindow(QWidget):
             self.pet_y = self.pet_y + (event.globalY() - self.drag_start_y)
             
             # 边界检查
-            screen = QApplication.primaryScreen()
-            if screen:
-                screen_geo = screen.geometry()
-                self.pet_x = max(0, min(self.pet_x, screen_geo.width() - self.pet_width))
-                self.pet_y = max(0, min(self.pet_y, screen_geo.height() - self.pet_height))
+            self.pet_x, self.pet_y = self._clamp_to_virtual_desktop(
+                self.pet_x, self.pet_y
+            )
             
             self.move(int(self.pet_x), int(self.pet_y))
             
@@ -1326,25 +1348,28 @@ class PetWindow(QWidget):
         """开始抛物线动画"""
         self.is_moving = True  # 设置移动标志
         
-        screen = QApplication.primaryScreen()
+        screen = self._screen_for_position()
         if not screen:
             return
         
-        screen_geo = screen.geometry()
+        screen_geo = screen.availableGeometry()
         
         # 计算目标位置
         vx = self.drag_velocity_x * 0.3
         
         target_x = self.pet_x + vx
-        target_y = screen_geo.height() - self.pet_height - 20
+        target_y = screen_geo.bottom() - self.pet_height - 19
         
         # 边界检查
-        target_x = max(0, min(target_x, screen_geo.width() - self.pet_width))
-        target_y = max(0, min(target_y, screen_geo.height() - self.pet_height))
+        target_x, target_y = clamp_window(
+            target_x, target_y, self.pet_width, self.pet_height,
+            self._screen_rect(screen),
+        )
         
         # 抛物线参数 - 限制高度偏移，确保不会超出屏幕顶部
-        max_height = min(abs(vx) * 0.3, self.pet_y - 50) if self.pet_y > 50 else 0
-        height_offset = -max_height if abs(vx) > 50 else -min(50, self.pet_y - 50) if self.pet_y > 50 else 0
+        top_clearance = max(0, self.pet_y - screen_geo.top() - 50)
+        max_height = min(abs(vx) * 0.3, top_clearance)
+        height_offset = -max_height if abs(vx) > 50 else -min(50, top_clearance)
         
         self.parabola_data = {
             'start_x': self.pet_x,
