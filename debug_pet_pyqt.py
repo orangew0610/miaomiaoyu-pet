@@ -188,6 +188,7 @@ class PetWindow(QWidget):
         self.walk_direction = 1
         self._motion_token = 0
         self._motion_mode = None
+        self._pet_geometry_generation = 0
         self._cursor_motion_token = None
         self._cursor_last_position = None
         self._cursor_still_since = time.monotonic()
@@ -748,6 +749,47 @@ class PetWindow(QWidget):
             return int(x), int(y)
         return clamp_window(x, y, self.pet_width, self.pet_height, bounds)
 
+    def _place_pet_window(self, x, y):
+        """Place the pet in native physical pixels, including across DPI boundaries."""
+        x, y = int(x), int(y)
+        self._pet_geometry_generation += 1
+        generation = self._pet_geometry_generation
+        self.move(x, y)
+        self._apply_native_pet_geometry(x, y, generation)
+        QTimer.singleShot(
+            0,
+            lambda px=x, py=y, current=generation:
+                self._apply_native_pet_geometry(px, py, current),
+        )
+        QTimer.singleShot(
+            80,
+            lambda px=x, py=y, current=generation:
+                self._apply_native_pet_geometry(px, py, current),
+        )
+
+    def _apply_native_pet_geometry(self, x, y, generation):
+        if generation != self._pet_geometry_generation or sys.platform != 'win32':
+            return
+        try:
+            # Qt can report the requested cross-screen geometry before the
+            # HWND has actually handled WM_DPICHANGED. SetWindowPos keeps the
+            # real top-level window and Qt's logical state in agreement.
+            if (self.width(), self.height()) != (
+                self.pet_width, self.pet_height
+            ):
+                self.setFixedSize(self.pet_width, self.pet_height)
+            ctypes.windll.user32.SetWindowPos(
+                int(self.winId()),
+                0,
+                int(x),
+                int(y),
+                self.pet_width,
+                self.pet_height,
+                0x0004 | 0x0010,  # SWP_NOZORDER | SWP_NOACTIVATE
+            )
+        except (AttributeError, OSError):
+            pass
+
     def _begin_motion(self, mode):
         if hasattr(self, 'cursor_linger_timer'):
             self.cursor_linger_timer.stop()
@@ -920,7 +962,7 @@ class PetWindow(QWidget):
             self.pet_x = int(self.target_x)
             self.pet_y = int(self.target_y)
             self._clamp_position()
-            self.move(self.pet_x, self.pet_y)
+            self._place_pet_window(self.pet_x, self.pet_y)
             self._set_state(PET_STATE_IDLE)
             self._on_cursor_arrived(token)
             if self.diagnostic_behavior.state == BehaviorState.NAVIGATE:
@@ -936,7 +978,7 @@ class PetWindow(QWidget):
         # 限制在屏幕内
         self._clamp_position()
         
-        self.move(int(self.pet_x), int(self.pet_y))
+        self._place_pet_window(self.pet_x, self.pet_y)
         
         # 更新方向并切换动画
         if dx > 0 and self.walk_direction != 1:
@@ -1361,7 +1403,7 @@ class PetWindow(QWidget):
             # 跳跃结束，确保落到屏幕底部
             self.pet_y = self._jump_end_y
             self._clamp_position()
-            self.move(self.pet_x, self.pet_y)
+            self._place_pet_window(self.pet_x, self.pet_y)
             self._finish_motion(token)
             self._set_state(PET_STATE_IDLE)
             return
@@ -1381,7 +1423,7 @@ class PetWindow(QWidget):
         self.pet_x = int(x)
         self.pet_y = int(y)
         self._clamp_position()
-        self.move(self.pet_x, self.pet_y)
+        self._place_pet_window(self.pet_x, self.pet_y)
         
         self._jump_step += 1
         QTimer.singleShot(
@@ -1411,7 +1453,7 @@ class PetWindow(QWidget):
             # 动画结束
             self.pet_x = int(data['end_x'])
             self.pet_y = int(data['end_y'])
-            self.move(self.pet_x, self.pet_y)
+            self._place_pet_window(self.pet_x, self.pet_y)
             self._set_state(PET_STATE_IDLE)
             self.parabola_timer.stop()
             self._finish_motion(token)
@@ -1428,7 +1470,7 @@ class PetWindow(QWidget):
         
         self.pet_x = int(x)
         self.pet_y = int(y)
-        self.move(self.pet_x, self.pet_y)
+        self._place_pet_window(self.pet_x, self.pet_y)
         
         # 更新动画状态（与原文件一致）
         state = (
@@ -1644,7 +1686,7 @@ class PetWindow(QWidget):
                 self.pet_x, self.pet_y
             )
             
-            self.move(int(self.pet_x), int(self.pet_y))
+            self._place_pet_window(self.pet_x, self.pet_y)
             
             # 更新起始位置
             self.drag_start_x = event.globalX()

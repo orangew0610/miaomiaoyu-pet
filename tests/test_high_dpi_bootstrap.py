@@ -33,6 +33,16 @@ def test_pet_uses_fixed_native_pixel_size_without_screen_resize_loop() -> None:
     assert "screenChanged.connect" not in source
 
 
+def test_pet_moves_through_one_native_geometry_gateway() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+
+    assert "def _place_pet_window(self, x, y):" in source
+    assert "ctypes.windll.user32.SetWindowPos(" in source
+    # One pre-show placement and one implementation call are the only direct
+    # QWidget.move usages; animation, dragging and arrival use the gateway.
+    assert source.count("self.move(") == 2
+
+
 def test_frames_and_small_ui_use_physical_pixel_targets() -> None:
     source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
 
