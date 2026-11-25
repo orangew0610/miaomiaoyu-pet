@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from debug_pet_pyqt import PET_STATE_HAPPY, PET_STATE_WALKING_RIGHT, PetWindow
+from debug_pet_pyqt import (
+    QApplication,
+    PET_STATE_HAPPY,
+    PET_STATE_WALKING_RIGHT,
+    PetWindow,
+)
 
 
 class FakeTimer:
@@ -9,6 +14,9 @@ class FakeTimer:
 
     def stop(self) -> None:
         self.stopped = True
+
+    def start(self, interval=None) -> None:
+        self.interval = interval
 
 
 def motion_subject():
@@ -56,3 +64,46 @@ def test_non_motion_emotion_cannot_replace_active_walk_animation() -> None:
 
     assert subject.current_state == PET_STATE_WALKING_RIGHT
     assert switched == []
+
+
+def test_cursor_action_never_preempts_diagnostic_or_drag(monkeypatch) -> None:
+    monkeypatch.setattr(QApplication, "activeModalWidget", lambda: None)
+    subject = SimpleNamespace(
+        is_dragging=False,
+        _motion_mode=None,
+        _diagnostic_busy=lambda: True,
+    )
+    assert not PetWindow._cursor_action_available(subject)
+
+    subject._diagnostic_busy = lambda: False
+    subject.is_dragging = True
+    assert not PetWindow._cursor_action_available(subject)
+
+
+def test_explicit_cursor_target_can_replace_walk_but_idle_attraction_cannot(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(QApplication, "activeModalWidget", lambda: None)
+    subject = SimpleNamespace(
+        is_dragging=False,
+        _motion_mode="walk",
+        _diagnostic_busy=lambda: False,
+    )
+
+    assert not PetWindow._cursor_action_available(subject)
+    assert PetWindow._cursor_action_available(subject, allow_random_walk=True)
+
+
+def test_only_matching_cursor_motion_starts_linger_timer() -> None:
+    timer = FakeTimer()
+    subject = SimpleNamespace(
+        _cursor_motion_token=8,
+        cursor_linger_timer=timer,
+    )
+
+    PetWindow._on_cursor_arrived(subject, 7)
+    assert not hasattr(timer, "interval")
+
+    PetWindow._on_cursor_arrived(subject, 8)
+    assert subject._cursor_motion_token is None
+    assert 6000 <= timer.interval <= 11000

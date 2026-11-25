@@ -14,6 +14,8 @@ import json
 import html
 import uuid
 import math
+import ctypes
+import time
 from datetime import datetime
 
 from debugpet.services.api import ModelApiClient
@@ -41,7 +43,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QPropertyAnimation, 
-    QEasingCurve, QRect, pyqtSignal, QThread
+    QEasingCurve, QRect, pyqtSignal, QThread, QLockFile
 )
 from PyQt5.QtGui import (
     QMovie, QPixmap, QImage, QPainter, QPen, QColor,
@@ -186,6 +188,11 @@ class PetWindow(QWidget):
         self.walk_direction = 1
         self._motion_token = 0
         self._motion_mode = None
+        self._cursor_motion_token = None
+        self._cursor_last_position = None
+        self._cursor_still_since = time.monotonic()
+        self._cursor_last_attraction = 0.0
+        self._left_button_was_down = False
         
         # 拖拽速度
         self.drag_velocity_x = 0
@@ -273,6 +280,7 @@ class PetWindow(QWidget):
         self.bubble_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self._bubble_float_phase = 0.0
+        self._bubble_target_size = None
         self._update_bubble_position_timer = QTimer(self)
         self._update_bubble_position_timer.timeout.connect(
             self._update_bubble_position
@@ -532,6 +540,18 @@ class PetWindow(QWidget):
         # 抛物线动画定时器
         self.parabola_timer = QTimer(self)
         self.parabola_timer.timeout.connect(self._animate_parabola)
+
+        # Observe rather than hook the mouse, so application clicks keep their
+        # normal meaning. A blank-desktop click may direct the pet; a cursor
+        # that remains still can attract it without consuming any input.
+        self.cursor_watch_timer = QTimer(self)
+        self.cursor_watch_timer.timeout.connect(self._watch_cursor)
+        self.cursor_watch_timer.setInterval(150)
+        self.cursor_watch_timer.start()
+
+        self.cursor_linger_timer = QTimer(self)
+        self.cursor_linger_timer.setSingleShot(True)
+        self.cursor_linger_timer.timeout.connect(self._finish_cursor_linger)
     
     def _set_state(self, state):
         motion_mode = getattr(self, '_motion_mode', None)
@@ -729,6 +749,8 @@ class PetWindow(QWidget):
         return clamp_window(x, y, self.pet_width, self.pet_height, bounds)
 
     def _begin_motion(self, mode):
+        if hasattr(self, 'cursor_linger_timer'):
+            self.cursor_linger_timer.stop()
         self._motion_token += 1
         self._motion_mode = mode
         self.is_moving = True
@@ -747,6 +769,105 @@ class PetWindow(QWidget):
         self.is_moving = False
         if hasattr(self, 'parabola_timer'):
             self.parabola_timer.stop()
+
+    def _cursor_action_available(self, allow_random_walk=False):
+        if self.is_dragging or self._diagnostic_busy():
+            return False
+        if QApplication.activeModalWidget() is not None:
+            return False
+        if self._motion_mode is None:
+            return True
+        return allow_random_walk and self._motion_mode == 'walk'
+
+    @staticmethod
+    def _is_blank_desktop_point(point):
+        if sys.platform != 'win32':
+            return False
+        try:
+            class POINT(ctypes.Structure):
+                _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.WindowFromPoint(POINT(point.x(), point.y()))
+            if not hwnd:
+                return False
+            root = user32.GetAncestor(hwnd, 2)  # GA_ROOT
+            buffer = ctypes.create_unicode_buffer(128)
+            user32.GetClassNameW(root or hwnd, buffer, len(buffer))
+            # Deliberately exclude SysListView32: clicking a desktop icon has
+            # an existing function and must not be interpreted as a command.
+            return buffer.value in {'Progman', 'WorkerW'}
+        except (AttributeError, OSError):
+            return False
+
+    def _watch_cursor(self):
+        point = QCursor.pos()
+        now = time.monotonic()
+        if self._cursor_last_position is None or (
+            abs(point.x() - self._cursor_last_position.x()) > 2
+            or abs(point.y() - self._cursor_last_position.y()) > 2
+        ):
+            self._cursor_last_position = QPoint(point)
+            self._cursor_still_since = now
+
+        left_down = False
+        if sys.platform == 'win32':
+            try:
+                left_down = bool(
+                    ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000
+                )
+            except (AttributeError, OSError):
+                pass
+        if left_down and not self._left_button_was_down:
+            if self._is_blank_desktop_point(point):
+                self._request_cursor_target(point, explicit=True)
+        self._left_button_was_down = left_down
+
+        still_for = now - self._cursor_still_since
+        if still_for >= 12.0 and now - self._cursor_last_attraction >= 30.0:
+            self._request_cursor_target(point, explicit=False)
+
+    def _request_cursor_target(self, point, explicit=False):
+        if not self._cursor_action_available(allow_random_walk=explicit):
+            return False
+        pet_center = QPoint(
+            int(self.x() + self.pet_width / 2),
+            int(self.y() + self.pet_height / 2),
+        )
+        distance = ((point.x() - pet_center.x()) ** 2
+                    + (point.y() - pet_center.y()) ** 2) ** 0.5
+        if distance < 90:
+            return False
+
+        lines = [
+            '你在这里呀，我过来陪你一会儿。',
+            '别动，我找到你了。',
+            '既然你不走，那我就靠近一点。',
+            '是在等我吗？我来了。',
+        ]
+        self._update_bubble(random.choice(lines), PET_STATE_HAPPY)
+        # Stand beside the pointer instead of covering the location the user
+        # selected. Clamping chooses the actual monitor containing the point.
+        target_x = point.x() + 24 - self.pet_width // 2
+        target_y = point.y() + 24 - self.pet_height // 2
+        self._cursor_motion_token = self._move_to_target(target_x, target_y)
+        self._cursor_last_attraction = time.monotonic()
+        return True
+
+    def _on_cursor_arrived(self, token):
+        if token != self._cursor_motion_token:
+            return
+        self._cursor_motion_token = None
+        self.cursor_linger_timer.start(random.randint(6000, 11000))
+
+    def _finish_cursor_linger(self):
+        if not self._cursor_action_available():
+            return
+        if random.random() < 0.5:
+            self._update_bubble('好吧，我就在这里陪着你。', PET_STATE_IDLE)
+            return
+        self._update_bubble('我先去转一圈，一会儿再来找你。', PET_STATE_IDLE)
+        self._start_random_walk()
 
     def _start_random_walk(self):
         """开始随机走动"""
@@ -801,6 +922,7 @@ class PetWindow(QWidget):
             self._clamp_position()
             self.move(self.pet_x, self.pet_y)
             self._set_state(PET_STATE_IDLE)
+            self._on_cursor_arrived(token)
             if self.diagnostic_behavior.state == BehaviorState.NAVIGATE:
                 self._on_navigation_arrived()
             return
@@ -846,6 +968,7 @@ class PetWindow(QWidget):
         )
         token = self._begin_motion('walk')
         self._move_step(token)
+        return token
 
     def _clamp_target(self):
         screen = self._screen_for_position(self.target_x, self.target_y)
@@ -1345,18 +1468,22 @@ class PetWindow(QWidget):
         """)
         self.bubble_label.setText(message)
         metrics = QFontMetrics(text_font)
+        natural_width = metrics.horizontalAdvance(message.replace('\n', ' ')) + 8
+        label_width = min(
+            max_text_width,
+            max(self._physical_px(120, screen), natural_width),
+        )
         text_rect = metrics.boundingRect(
-            QRect(0, 0, max_text_width, 10000),
+            QRect(0, 0, label_width, 10000),
             Qt.TextWordWrap | Qt.AlignCenter,
             message,
         )
         
         # 获取气泡尺寸
-        label_width = max(self._physical_px(80, screen), text_rect.width() + 8)
-        label_height = max(metrics.lineSpacing(), text_rect.height() + 8)
+        label_height = max(metrics.lineSpacing(), text_rect.height() + 16)
         self.bubble_label.setFixedSize(label_width, label_height)
-        cloud_pad_x = self._physical_px(50, screen)
-        cloud_pad_y = self._physical_px(28, screen)
+        cloud_pad_x = self._physical_px(70, screen)
+        cloud_pad_y = self._physical_px(36, screen)
         bubble_width = label_width + cloud_pad_x * 2
         bubble_height = label_height + cloud_pad_y * 2
         
@@ -1375,24 +1502,44 @@ class PetWindow(QWidget):
                 self._screen_rect(screen),
             )
         
-        self.bubble_window.setGeometry(
-            bubble_x, bubble_y, bubble_width, bubble_height
-        )
+        self._bubble_target_size = (bubble_width, bubble_height)
+        # Moving and resizing a top-level window in one setGeometry call lets
+        # Windows apply the old monitor's DPI to the new monitor's size. Move
+        # first, then re-assert the intended geometry after WM_DPICHANGED has
+        # been processed; otherwise the child label can outgrow its cloud.
+        self.bubble_window.move(bubble_x, bubble_y)
+        self.bubble_window.resize(bubble_width, bubble_height)
         self.bubble_label.setGeometry(
             cloud_pad_x, cloud_pad_y, label_width, label_height
         )
         
         self.bubble_window.show()
+        QTimer.singleShot(0, self._stabilize_bubble_geometry)
         
         # 移动时更新气泡位置
         self._bubble_float_phase = 0.0
         self._update_bubble_position_timer.start()
+
+    def _stabilize_bubble_geometry(self):
+        if not self.bubble_window.isVisible() or not self._bubble_target_size:
+            return
+        width, height = self._bubble_target_size
+        if (self.bubble_window.width(), self.bubble_window.height()) != (
+            width, height
+        ):
+            self.bubble_window.resize(width, height)
+        self._update_bubble_position()
     
     def _update_bubble_position(self):
         """更新气泡位置（跟随宠物）"""
         if self.bubble_window.isVisible():
-            bubble_width = self.bubble_window.width()
-            bubble_height = self.bubble_window.height()
+            bubble_width, bubble_height = self._bubble_target_size or (
+                self.bubble_window.width(), self.bubble_window.height()
+            )
+            if (self.bubble_window.width(), self.bubble_window.height()) != (
+                bubble_width, bubble_height
+            ):
+                self.bubble_window.resize(bubble_width, bubble_height)
             
             pet_x, pet_y = self.x(), self.y()
             bubble_x = pet_x + (self.pet_width - bubble_width) // 2
@@ -2806,6 +2953,16 @@ def main():
     enable_per_monitor_dpi_awareness()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+
+    # Two independent top-level pet processes look exactly like the historic
+    # dual-screen flicker bug. Keep the lock alive for the whole event loop so
+    # a second launch exits without creating another pet or bubble window.
+    instance_lock = QLockFile(
+        os.path.join(tempfile.gettempdir(), "DebugPet-v2-single-instance.lock")
+    )
+    if not instance_lock.tryLock(0):
+        print("[APP] DebugPet is already running", flush=True)
+        return 0
     
     # 设置应用样式
     app.setStyle('Fusion')
@@ -2814,8 +2971,10 @@ def main():
     pet = PetWindow()
     pet.show()
     
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+    instance_lock.unlock()
+    return exit_code
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

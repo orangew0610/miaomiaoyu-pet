@@ -12,6 +12,15 @@ def test_application_uses_one_native_pixel_coordinate_system() -> None:
     assert "Qt.AA_EnableHighDpiScaling" not in main_source
 
 
+def test_application_rejects_a_second_pet_process() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+    main_source = source[source.index("def main():") :]
+
+    assert "QLockFile" in source
+    assert "DebugPet-v2-single-instance.lock" in main_source
+    assert "if not instance_lock.tryLock(0):" in main_source
+
+
 def test_pet_uses_fixed_native_pixel_size_without_screen_resize_loop() -> None:
     source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
 
@@ -52,3 +61,13 @@ def test_cloud_bubble_has_state_background_and_float_animation() -> None:
     assert "class CloudBubbleWindow(QWidget):" in source
     assert "STATE_BUBBLE_BACKGROUNDS" in source
     assert "math.sin(self._bubble_float_phase) * 3" in source
+
+
+def test_bubble_measures_text_at_the_same_width_it_assigns() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+
+    assert "QRect(0, 0, label_width, 10000)" in source
+    assert "self.bubble_label.setFixedSize(label_width, label_height)" in source
+    assert "text_rect.width() + 8" not in source
+    assert "cloud_pad_x = self._physical_px(70, screen)" in source
+    assert "QTimer.singleShot(0, self._stabilize_bubble_geometry)" in source
