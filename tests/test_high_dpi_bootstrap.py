@@ -1,0 +1,21 @@
+from pathlib import Path
+
+
+def test_high_dpi_attributes_are_set_before_qapplication() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+    main_source = source[source.index("def main():") :]
+
+    create_app = main_source.index("app = QApplication(sys.argv)")
+    enable_scaling = main_source.index("Qt.AA_EnableHighDpiScaling")
+    enable_pixmaps = main_source.index("Qt.AA_UseHighDpiPixmaps")
+
+    assert enable_scaling < create_app
+    assert enable_pixmaps < create_app
+
+
+def test_pet_restores_fixed_logical_size_after_screen_change() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+
+    assert "self.setFixedSize(self.pet_width, self.pet_height)" in source
+    assert "self.pet_label.setFixedSize(self.pet_width, self.pet_height)" in source
+    assert "handle.screenChanged.connect(self._on_screen_changed)" in source

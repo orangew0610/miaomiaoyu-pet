@@ -78,6 +78,13 @@
 - 自动化测试覆盖负坐标、右侧扩展屏、屏幕间空隙、虚拟桌面并集和基于绝对原点的窗口边界限制。
 - 移动途中使用虚拟桌面边界，避免经过非连续屏幕布局时被错误拉回主屏；最终目标、跳跃落点和气泡仍限制在对应屏幕可用工作区。
 
+## 2026-11-25：跨屏 DPI 缩放修复
+
+- 两块实机显示器的 Windows/Qt 缩放比均为 `2.0`。旧启动流程只启用了 Per-Monitor V2 原生 DPI awareness，却没有在创建 `QApplication` 前启用 Qt 高 DPI scaling，导致物理屏幕坐标与逻辑控件尺寸混用，跨屏后角色被裁剪。
+- 在 `QApplication` 构造前启用 `AA_EnableHighDpiScaling` 和 `AA_UseHighDpiPixmaps`，确保窗口、标签、动画帧和屏幕几何统一使用 Qt 逻辑坐标，由 Qt 按目标屏 DPR 绘制。
+- 首次复测发现 Windows 在 DPI 过渡时保留旧物理尺寸，使顶层窗口短暂缩为 225×225，而内部动画标签仍为 300×300；因此进一步固定窗口/标签逻辑尺寸，并在 `screenChanged` 后重新应用。
+- 最终实测：扩展屏 `DISPLAY5` 上窗口 300×300、标签 300×300、DPR 2.0，窗口抓图 600×600，角色完整且无裁剪。
+
 ## 2026-11-24：VSCode UI Automation 可行性探针
 
 - 环境：Windows UI Automation backend（pywinauto 0.6.9）。

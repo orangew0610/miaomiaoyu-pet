@@ -128,6 +128,7 @@ class PetWindow(QWidget):
         self.is_moving = False
         self.is_dragging = False
         self.walk_direction = 1
+        self._screen_change_connected = False
         
         # 拖拽速度
         self.drag_velocity_x = 0
@@ -180,11 +181,13 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         
         # 设置窗口大小和位置
-        self.setGeometry(self.pet_x, self.pet_y, self.pet_width, self.pet_height)
+        self.setFixedSize(self.pet_width, self.pet_height)
+        self.move(self.pet_x, self.pet_y)
         
         # 创建宠物标签
         self.pet_label = QLabel(self)
         self.pet_label.setGeometry(0, 0, self.pet_width, self.pet_height)
+        self.pet_label.setFixedSize(self.pet_width, self.pet_height)
         self.pet_label.setAlignment(Qt.AlignCenter)
         self.pet_label.setScaledContents(True)
         
@@ -243,6 +246,26 @@ class PetWindow(QWidget):
         
         # 启动时打招呼
         QTimer.singleShot(1500, self._greet_on_start)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle and not self._screen_change_connected:
+            handle.screenChanged.connect(self._on_screen_changed)
+            self._screen_change_connected = True
+
+    def _on_screen_changed(self, _screen):
+        # Windows can preserve the old physical size during a monitor DPI
+        # transition, shrinking Qt's logical top-level size and clipping the
+        # still-300x300 animation label. Restore logical dimensions once the
+        # screen transition has settled.
+        def restore_logical_size():
+            self.setFixedSize(self.pet_width, self.pet_height)
+            self.pet_label.setFixedSize(self.pet_width, self.pet_height)
+            if self.bubble_window.isVisible():
+                self._update_bubble_position()
+
+        QTimer.singleShot(0, restore_logical_size)
     
     def _load_pet_frames(self):
         """加载宠物动画帧 - 支持翻转"""
@@ -2618,6 +2641,11 @@ class ChatDialog(QDialog):
 # ============== 主程序 ==============
 def main():
     enable_per_monitor_dpi_awareness()
+    # These attributes must be set before QApplication is constructed. Without
+    # them, a per-monitor-aware Windows process mixes physical screen
+    # coordinates with Qt logical widget sizes and clips the pet at 150%/200%.
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     
