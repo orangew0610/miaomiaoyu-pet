@@ -45,7 +45,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QMovie, QPixmap, QImage, QPainter, QPen, QColor,
-    QCursor, QIcon, QFont, QKeySequence, QPainterPath
+    QCursor, QIcon, QFont, QKeySequence, QPainterPath, QFontMetrics
 )
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
 
@@ -534,6 +534,14 @@ class PetWindow(QWidget):
         self.parabola_timer.timeout.connect(self._animate_parabola)
     
     def _set_state(self, state):
+        motion_mode = getattr(self, '_motion_mode', None)
+        motion_states = {
+            'walk': {PET_STATE_WALKING_LEFT, PET_STATE_WALKING_RIGHT},
+            'jump': {PET_STATE_JUMPING_LEFT, PET_STATE_JUMPING_RIGHT},
+            'parabola': {PET_STATE_JUMPING_LEFT, PET_STATE_JUMPING_RIGHT},
+        }
+        if motion_mode and state not in motion_states.get(motion_mode, set()):
+            return
         """设置宠物状态"""
         if state == self.current_state and state != PET_STATE_IDLE:
             return
@@ -1300,10 +1308,11 @@ class PetWindow(QWidget):
         self.move(self.pet_x, self.pet_y)
         
         # 更新动画状态（与原文件一致）
-        if t < 0.3:
-            state = PET_STATE_HAPPY
-        else:
-            state = PET_STATE_JUMPING_RIGHT if data['vx'] >= 0 else PET_STATE_JUMPING_LEFT
+        state = (
+            PET_STATE_JUMPING_RIGHT
+            if data['vx'] >= 0
+            else PET_STATE_JUMPING_LEFT
+        )
         self._set_state(state)
     
     def _update_bubble(self, message, state=None):
@@ -1318,33 +1327,43 @@ class PetWindow(QWidget):
         self._bubble_state_key = state_key
         screen = self._screen_for_position()
         font_size = self._physical_px(24, screen)
+        text_font = QFont('Microsoft YaHei UI')
+        text_font.setPixelSize(font_size)
+        text_font.setBold(True)
         
         print(f"[BUBBLE] 消息: {message[:20]}... | 状态: {state_key} | 颜色: {color}")
         
         self.bubble_window.set_colors(background, color)
-        self.bubble_label.setMaximumWidth(self._physical_px(460, screen))
+        max_text_width = self._physical_px(420, screen)
+        self.bubble_label.setFont(text_font)
+        self.bubble_label.setAlignment(Qt.AlignCenter)
         self.bubble_label.setStyleSheet(f"""
             background-color: transparent;
             border: none;
-            font-size: {font_size}px;
-            font-weight: bold;
             color: #4A148C;
             font-family: 'Microsoft YaHei UI', 'SimHei';
         """)
         self.bubble_label.setText(message)
-        self.bubble_label.adjustSize()
+        metrics = QFontMetrics(text_font)
+        text_rect = metrics.boundingRect(
+            QRect(0, 0, max_text_width, 10000),
+            Qt.TextWordWrap | Qt.AlignCenter,
+            message,
+        )
         
         # 获取气泡尺寸
-        label_width = self.bubble_label.width()
-        label_height = self.bubble_label.height()
-        cloud_pad_x = self._physical_px(34, screen)
-        cloud_pad_y = self._physical_px(20, screen)
+        label_width = max(self._physical_px(80, screen), text_rect.width() + 8)
+        label_height = max(metrics.lineSpacing(), text_rect.height() + 8)
+        self.bubble_label.setFixedSize(label_width, label_height)
+        cloud_pad_x = self._physical_px(50, screen)
+        cloud_pad_y = self._physical_px(28, screen)
         bubble_width = label_width + cloud_pad_x * 2
         bubble_height = label_height + cloud_pad_y * 2
         
         # 设置气泡窗口位置（宠物上方居中）
-        bubble_x = int(self.pet_x) + (self.pet_width - bubble_width) // 2
-        bubble_y = int(self.pet_y) - bubble_height - self._physical_px(20, screen)
+        pet_x, pet_y = self.x(), self.y()
+        bubble_x = pet_x + (self.pet_width - bubble_width) // 2
+        bubble_y = pet_y - bubble_height - self._physical_px(20, screen)
         
         # 边界检查
         screen = self._screen_for_position(
@@ -1375,14 +1394,15 @@ class PetWindow(QWidget):
             bubble_width = self.bubble_window.width()
             bubble_height = self.bubble_window.height()
             
-            bubble_x = int(self.pet_x) + (self.pet_width - bubble_width) // 2
+            pet_x, pet_y = self.x(), self.y()
+            bubble_x = pet_x + (self.pet_width - bubble_width) // 2
             screen = self._screen_for_position()
             self._bubble_float_phase = (
                 self._bubble_float_phase + 0.12
             ) % (math.pi * 2)
             float_offset = round(math.sin(self._bubble_float_phase) * 3)
             bubble_y = (
-                int(self.pet_y) - bubble_height
+                pet_y - bubble_height
                 - self._physical_px(20, screen) + float_offset
             )
             

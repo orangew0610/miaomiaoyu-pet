@@ -30,7 +30,9 @@ def test_frames_and_small_ui_use_physical_pixel_targets() -> None:
     assert "self.idle_movies.append((gif_name, frames))" in source
     assert "font_size = self._physical_px(24, screen)" in source
     assert "font_size = self._physical_px(22, screen)" in source
-    assert "self.bubble_label.setMaximumWidth(self._physical_px(460, screen))" in source
+    assert "QFontMetrics(text_font)" in source
+    assert "max_text_width = self._physical_px(420, screen)" in source
+    assert "pet_x, pet_y = self.x(), self.y()" in source
 
 
 def test_motion_callbacks_are_bound_to_a_generation_token() -> None:

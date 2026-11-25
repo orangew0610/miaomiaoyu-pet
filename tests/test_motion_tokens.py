@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from debug_pet_pyqt import PetWindow
+from debug_pet_pyqt import PET_STATE_HAPPY, PET_STATE_WALKING_RIGHT, PetWindow
 
 
 class FakeTimer:
@@ -42,3 +42,17 @@ def test_cancel_motion_invalidates_callbacks_and_stops_inertia_timer() -> None:
     assert subject._motion_mode is None
     assert not subject.is_moving
     assert subject.parabola_timer.stopped
+
+
+def test_non_motion_emotion_cannot_replace_active_walk_animation() -> None:
+    switched = []
+    subject = SimpleNamespace(
+        _motion_mode="walk",
+        current_state=PET_STATE_WALKING_RIGHT,
+        _switch_animation=switched.append,
+    )
+
+    PetWindow._set_state(subject, PET_STATE_HAPPY)
+
+    assert subject.current_state == PET_STATE_WALKING_RIGHT
+    assert switched == []
