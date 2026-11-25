@@ -13,6 +13,7 @@ import re
 import json
 import html
 import uuid
+import math
 from datetime import datetime
 
 from debugpet.services.api import ModelApiClient
@@ -44,7 +45,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QMovie, QPixmap, QImage, QPainter, QPen, QColor,
-    QCursor, QIcon, QFont, QKeySequence
+    QCursor, QIcon, QFont, QKeySequence, QPainterPath
 )
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
 
@@ -110,6 +111,58 @@ STATE_COLORS = {
     PET_STATE_FAILED: "#E57373",    # 红色系
 }
 
+STATE_BUBBLE_BACKGROUNDS = {
+    PET_STATE_IDLE: "#FCE8F3",
+    PET_STATE_WALKING: "#F3E5F5",
+    PET_STATE_WALKING_LEFT: "#F3E5F5",
+    PET_STATE_WALKING_RIGHT: "#F3E5F5",
+    PET_STATE_JUMPING_LEFT: "#EDE7F6",
+    PET_STATE_JUMPING_RIGHT: "#EDE7F6",
+    PET_STATE_THINKING: "#E3F2FD",
+    PET_STATE_HAPPY: "#FCE4EC",
+    PET_STATE_SAD: "#E8EAF6",
+    PET_STATE_WAITING: "#FFEBEE",
+    PET_STATE_FAILED: "#FFCDD2",
+}
+
+
+class CloudBubbleWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.background_color = QColor("#FCE8F3")
+        self.border_color = QColor("#CE93D8")
+
+    def set_colors(self, background, border):
+        self.background_color = QColor(background)
+        self.border_color = QColor(border)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        width = max(1, self.width() - 1)
+        height = max(1, self.height() - 1)
+        path = QPainterPath()
+        path.moveTo(width * 0.13, height * 0.78)
+        path.cubicTo(width * 0.01, height * 0.72, width * 0.01, height * 0.43,
+                     width * 0.16, height * 0.38)
+        path.cubicTo(width * 0.13, height * 0.18, width * 0.33, height * 0.08,
+                     width * 0.43, height * 0.20)
+        path.cubicTo(width * 0.53, height * 0.02, width * 0.75, height * 0.10,
+                     width * 0.76, height * 0.27)
+        path.cubicTo(width * 0.94, height * 0.23, width * 0.99, height * 0.48,
+                     width * 0.88, height * 0.59)
+        path.cubicTo(width * 0.98, height * 0.76, width * 0.83, height * 0.93,
+                     width * 0.68, height * 0.84)
+        path.cubicTo(width * 0.57, height * 0.98, width * 0.36, height * 0.94,
+                     width * 0.31, height * 0.84)
+        path.cubicTo(width * 0.23, height * 0.92, width * 0.14, height * 0.88,
+                     width * 0.13, height * 0.78)
+        path.closeSubpath()
+        painter.fillPath(path, self.background_color)
+        painter.setPen(QPen(self.border_color, 3))
+        painter.drawPath(path)
+
 
 # ============== PyQt5 主窗口类 ==============
 class PetWindow(QWidget):
@@ -121,20 +174,18 @@ class PetWindow(QWidget):
         # 宠物位置
         self.pet_x = 100
         self.pet_y = 100
-        # Keep the pet near 300 physical pixels on every monitor. Qt widget
-        # geometry is logical pixels once high-DPI mode is enabled.
+        # The process uses one coordinate system: native Windows pixels.
         self.pet_physical_width = 300
         self.pet_physical_height = 300
-        initial_screen = QApplication.primaryScreen()
-        initial_dpr = initial_screen.devicePixelRatio() if initial_screen else 1.0
-        self.pet_width = max(1, round(self.pet_physical_width / initial_dpr))
-        self.pet_height = max(1, round(self.pet_physical_height / initial_dpr))
+        self.pet_width = self.pet_physical_width
+        self.pet_height = self.pet_physical_height
         
         # 移动相关
         self.is_moving = False
         self.is_dragging = False
         self.walk_direction = 1
-        self._screen_change_connected = False
+        self._motion_token = 0
+        self._motion_mode = None
         
         # 拖拽速度
         self.drag_velocity_x = 0
@@ -205,7 +256,7 @@ class PetWindow(QWidget):
         self.setCursor(QCursor(Qt.OpenHandCursor))
         
         # 气泡窗口（独立窗口，避免被裁剪）
-        self.bubble_window = QWidget()
+        self.bubble_window = CloudBubbleWindow()
         self.bubble_window.setWindowFlags(
             Qt.FramelessWindowHint |
             Qt.WindowStaysOnTopHint |
@@ -219,6 +270,14 @@ class PetWindow(QWidget):
         self.bubble_label.setAlignment(Qt.AlignCenter)
         self.bubble_label.setTextFormat(Qt.PlainText)
         self.bubble_label.setWordWrap(True)
+        self.bubble_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self._bubble_float_phase = 0.0
+        self._update_bubble_position_timer = QTimer(self)
+        self._update_bubble_position_timer.timeout.connect(
+            self._update_bubble_position
+        )
+        self._update_bubble_position_timer.setInterval(50)
         
         self.bubble_window.hide()
         
@@ -253,36 +312,6 @@ class PetWindow(QWidget):
         # 启动时打招呼
         QTimer.singleShot(1500, self._greet_on_start)
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        handle = self.windowHandle()
-        if handle and not self._screen_change_connected:
-            handle.screenChanged.connect(self._on_screen_changed)
-            self._screen_change_connected = True
-
-    def _on_screen_changed(self, screen):
-        # Windows can preserve the old physical size during a monitor DPI
-        # transition, shrinking Qt's logical top-level size and clipping the
-        # still-300x300 animation label. Restore logical dimensions once the
-        # screen transition has settled.
-        def restore_logical_size():
-            dpr = screen.devicePixelRatio() if screen else 1.0
-            self.pet_width = max(1, round(self.pet_physical_width / dpr))
-            self.pet_height = max(1, round(self.pet_physical_height / dpr))
-            self.setFixedSize(self.pet_width, self.pet_height)
-            self.pet_label.setFixedSize(self.pet_width, self.pet_height)
-            self._clamp_position()
-            self.move(int(self.pet_x), int(self.pet_y))
-            self._switch_animation(self.current_state)
-            if self.bubble_window.isVisible():
-                message = self.bubble_label.text()
-                bubble_state = getattr(self, '_bubble_state_key', self.current_state)
-                if hasattr(self, '_update_bubble_position_timer'):
-                    self._update_bubble_position_timer.stop()
-                self._update_bubble(message, bubble_state)
-
-        QTimer.singleShot(0, restore_logical_size)
-    
     def _load_pet_frames(self):
         """加载宠物动画帧 - 支持翻转"""
         from PIL import Image
@@ -478,10 +507,8 @@ class PetWindow(QWidget):
                 self._display_pixmap(frames[self.current_frame_index])
 
     def _display_pixmap(self, pixmap):
-        """Map a cached physical frame 1:1 onto the current monitor."""
-        rendered = QPixmap(pixmap)
-        rendered.setDevicePixelRatio(max(1.0, self.devicePixelRatioF()))
-        self.pet_label.setPixmap(rendered)
+        """Display the single-sampled physical frame without DPR remapping."""
+        self.pet_label.setPixmap(pixmap)
     
     def _setup_timers(self):
         """设置定时器"""
@@ -514,9 +541,6 @@ class PetWindow(QWidget):
         self.current_state = state
         
         # 切换到 idle 状态时停止移动
-        if state == PET_STATE_IDLE:
-            self.is_moving = False
-        
         self._switch_animation(state)
         
         # idle 状态重置切换计时器
@@ -672,9 +696,7 @@ class PetWindow(QWidget):
         return [self._screen_rect(screen) for screen in QApplication.screens()]
 
     def _physical_px(self, value, screen=None):
-        screen = screen or self._screen_for_position()
-        dpr = screen.devicePixelRatio() if screen else 1.0
-        return max(1, round(value / max(1.0, dpr)))
+        return max(1, round(value))
 
     def _screen_for_position(self, x=None, y=None, width=None, height=None):
         x = int(self.pet_x if x is None else x)
@@ -697,6 +719,26 @@ class PetWindow(QWidget):
         if not bounds:
             return int(x), int(y)
         return clamp_window(x, y, self.pet_width, self.pet_height, bounds)
+
+    def _begin_motion(self, mode):
+        self._motion_token += 1
+        self._motion_mode = mode
+        self.is_moving = True
+        return self._motion_token
+
+    def _finish_motion(self, token):
+        if token != self._motion_token:
+            return False
+        self._motion_mode = None
+        self.is_moving = False
+        return True
+
+    def _cancel_motion(self):
+        self._motion_token += 1
+        self._motion_mode = None
+        self.is_moving = False
+        if hasattr(self, 'parabola_timer'):
+            self.parabola_timer.stop()
 
     def _start_random_walk(self):
         """开始随机走动"""
@@ -729,12 +771,12 @@ class PetWindow(QWidget):
             self._set_state(PET_STATE_WALKING_LEFT)
         
         # 开始移动
-        self.is_moving = True
-        self._move_step()
+        token = self._begin_motion('walk')
+        self._move_step(token)
     
-    def _move_step(self):
+    def _move_step(self, token):
         """移动一步"""
-        if not self.is_moving:
+        if token != self._motion_token or self._motion_mode != 'walk':
             return
         
         dx = self.target_x - self.pet_x
@@ -744,7 +786,8 @@ class PetWindow(QWidget):
         
         if distance < 5:
             # 到达目标
-            self.is_moving = False
+            if not self._finish_motion(token):
+                return
             self.pet_x = int(self.target_x)
             self.pet_y = int(self.target_y)
             self._clamp_position()
@@ -774,7 +817,7 @@ class PetWindow(QWidget):
             self._set_state(PET_STATE_WALKING_LEFT)
         
         # 继续移动
-        QTimer.singleShot(30, self._move_step)
+        QTimer.singleShot(30, lambda current=token: self._move_step(current))
     
     def _clamp_position(self):
         """限制宠物位置在屏幕内"""
@@ -793,8 +836,8 @@ class PetWindow(QWidget):
             if self.walk_direction > 0
             else PET_STATE_WALKING_LEFT
         )
-        self.is_moving = True
-        self._move_step()
+        token = self._begin_motion('walk')
+        self._move_step(token)
 
     def _clamp_target(self):
         screen = self._screen_for_position(self.target_x, self.target_y)
@@ -952,7 +995,7 @@ class PetWindow(QWidget):
 
     def _cancel_navigation(self, reason):
         if self.diagnostic_behavior.cancel(reason):
-            self.is_moving = False
+            self._cancel_motion()
             print(f"[NAV] cancelled: {reason}")
 
     def _schedule_resolution_confirmation(self, event):
@@ -981,7 +1024,7 @@ class PetWindow(QWidget):
         if timer:
             timer.deleteLater()
         if self.diagnostic_behavior.celebrate(identity):
-            self.is_moving = False
+            self._cancel_motion()
             self._set_state(PET_STATE_HAPPY)
             self._update_bubble("修好了！这次值得庆祝一下。", PET_STATE_HAPPY)
             QTimer.singleShot(4500, lambda: self._set_state(PET_STATE_IDLE))
@@ -1166,7 +1209,7 @@ class PetWindow(QWidget):
         self._jump_start_y = self.pet_y
         # 跳跃终点落到屏幕底部
         self._jump_end_y = screen_geo.bottom() - self.pet_height + 1
-        self.is_moving = True
+        token = self._begin_motion('jump')
         
         # 根据方向设置目标
         if self.walk_direction > 0:
@@ -1177,16 +1220,18 @@ class PetWindow(QWidget):
             self._set_state(PET_STATE_JUMPING_LEFT)
         
         # 执行跳跃动画
-        self._do_jump_step(jump_steps)
+        self._do_jump_step(jump_steps, token)
     
-    def _do_jump_step(self, total_steps):
+    def _do_jump_step(self, total_steps, token):
         """执行跳跃的一步 - 落到屏幕底部"""
+        if token != self._motion_token or self._motion_mode != 'jump':
+            return
         if self._jump_step >= total_steps:
             # 跳跃结束，确保落到屏幕底部
             self.pet_y = self._jump_end_y
             self._clamp_position()
             self.move(self.pet_x, self.pet_y)
-            self.is_moving = False
+            self._finish_motion(token)
             self._set_state(PET_STATE_IDLE)
             return
         
@@ -1208,7 +1253,9 @@ class PetWindow(QWidget):
         self.move(self.pet_x, self.pet_y)
         
         self._jump_step += 1
-        QTimer.singleShot(30, lambda: self._do_jump_step(total_steps))
+        QTimer.singleShot(
+            30, lambda current=token: self._do_jump_step(total_steps, current)
+        )
     
     def _on_move_timer(self):
         """移动定时器回调"""
@@ -1220,10 +1267,13 @@ class PetWindow(QWidget):
         """抛物线动画"""
         if not hasattr(self, 'parabola_data'):
             self.parabola_timer.stop()
-            self.is_moving = False
             return
         
         data = self.parabola_data
+        token = data['motion_token']
+        if token != self._motion_token or self._motion_mode != 'parabola':
+            self.parabola_timer.stop()
+            return
         data['current_step'] += 1
         
         if data['current_step'] >= data['steps']:
@@ -1233,7 +1283,7 @@ class PetWindow(QWidget):
             self.move(self.pet_x, self.pet_y)
             self._set_state(PET_STATE_IDLE)
             self.parabola_timer.stop()
-            self.is_moving = False  # 重置移动标志
+            self._finish_motion(token)
             return
         
         t = data['current_step'] / data['steps']
@@ -1264,22 +1314,18 @@ class PetWindow(QWidget):
         # 使用传入的 state 或当前状态
         state_key = state if state else self.current_state
         color = STATE_COLORS.get(state_key, "#F2F2F2")
+        background = STATE_BUBBLE_BACKGROUNDS.get(state_key, "#FCE8F3")
         self._bubble_state_key = state_key
         screen = self._screen_for_position()
-        border = self._physical_px(3, screen)
-        radius = self._physical_px(18, screen)
-        pad_y = self._physical_px(12, screen)
-        pad_x = self._physical_px(18, screen)
         font_size = self._physical_px(24, screen)
         
         print(f"[BUBBLE] 消息: {message[:20]}... | 状态: {state_key} | 颜色: {color}")
         
-        self.bubble_label.setMaximumWidth(self._physical_px(520, screen))
+        self.bubble_window.set_colors(background, color)
+        self.bubble_label.setMaximumWidth(self._physical_px(460, screen))
         self.bubble_label.setStyleSheet(f"""
-            background-color: rgba(252, 232, 243, 0.92);
-            border: {border}px solid {color};
-            border-radius: {radius}px;
-            padding: {pad_y}px {pad_x}px;
+            background-color: transparent;
+            border: none;
             font-size: {font_size}px;
             font-weight: bold;
             color: #4A148C;
@@ -1291,49 +1337,61 @@ class PetWindow(QWidget):
         # 获取气泡尺寸
         label_width = self.bubble_label.width()
         label_height = self.bubble_label.height()
+        cloud_pad_x = self._physical_px(34, screen)
+        cloud_pad_y = self._physical_px(20, screen)
+        bubble_width = label_width + cloud_pad_x * 2
+        bubble_height = label_height + cloud_pad_y * 2
         
         # 设置气泡窗口位置（宠物上方居中）
-        bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
-        bubble_y = int(self.pet_y) - label_height - self._physical_px(20, screen)
+        bubble_x = int(self.pet_x) + (self.pet_width - bubble_width) // 2
+        bubble_y = int(self.pet_y) - bubble_height - self._physical_px(20, screen)
         
         # 边界检查
         screen = self._screen_for_position(
-            bubble_x, bubble_y, label_width, label_height
+            bubble_x, bubble_y, bubble_width, bubble_height
         )
         if screen:
             bubble_x, bubble_y = clamp_window(
-                bubble_x, bubble_y, label_width, label_height,
+                bubble_x, bubble_y, bubble_width, bubble_height,
                 self._screen_rect(screen),
             )
         
-        self.bubble_window.setGeometry(bubble_x, bubble_y, label_width, label_height)
-        self.bubble_label.setGeometry(0, 0, label_width, label_height)
+        self.bubble_window.setGeometry(
+            bubble_x, bubble_y, bubble_width, bubble_height
+        )
+        self.bubble_label.setGeometry(
+            cloud_pad_x, cloud_pad_y, label_width, label_height
+        )
         
         self.bubble_window.show()
         
         # 移动时更新气泡位置
-        self._update_bubble_position_timer = QTimer(self)
-        self._update_bubble_position_timer.timeout.connect(self._update_bubble_position)
-        self._update_bubble_position_timer.start(50)
+        self._bubble_float_phase = 0.0
+        self._update_bubble_position_timer.start()
     
     def _update_bubble_position(self):
         """更新气泡位置（跟随宠物）"""
         if self.bubble_window.isVisible():
-            label_width = self.bubble_label.width()
-            label_height = self.bubble_label.height()
+            bubble_width = self.bubble_window.width()
+            bubble_height = self.bubble_window.height()
             
-            bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
+            bubble_x = int(self.pet_x) + (self.pet_width - bubble_width) // 2
             screen = self._screen_for_position()
+            self._bubble_float_phase = (
+                self._bubble_float_phase + 0.12
+            ) % (math.pi * 2)
+            float_offset = round(math.sin(self._bubble_float_phase) * 3)
             bubble_y = (
-                int(self.pet_y) - label_height - self._physical_px(20, screen)
+                int(self.pet_y) - bubble_height
+                - self._physical_px(20, screen) + float_offset
             )
             
             screen = self._screen_for_position(
-                bubble_x, bubble_y, label_width, label_height
+                bubble_x, bubble_y, bubble_width, bubble_height
             )
             if screen:
                 bubble_x, bubble_y = clamp_window(
-                    bubble_x, bubble_y, label_width, label_height,
+                    bubble_x, bubble_y, bubble_width, bubble_height,
                     self._screen_rect(screen),
                 )
             
@@ -1344,6 +1402,7 @@ class PetWindow(QWidget):
         """鼠标按下事件"""
         if event.button() == Qt.LeftButton:
             self._cancel_navigation("pet-dragged")
+            self._cancel_motion()
             self.is_dragging = True
             self.drag_start_x = event.globalX()
             self.drag_start_y = event.globalY()
@@ -1439,11 +1498,10 @@ class PetWindow(QWidget):
     
     def _start_parabola(self):
         """开始抛物线动画"""
-        self.is_moving = True  # 设置移动标志
-        
         screen = self._screen_for_position()
         if not screen:
             return
+        token = self._begin_motion('parabola')
         
         screen_geo = screen.availableGeometry()
         
@@ -1472,7 +1530,8 @@ class PetWindow(QWidget):
             'vx': vx,
             'height_offset': height_offset,
             'current_step': 0,
-            'steps': 30
+            'steps': 30,
+            'motion_token': token,
         }
         
         self.parabola_timer.start(30)
@@ -1865,13 +1924,13 @@ class CodeCheckerDialog(QDialog):
                 self.error_text.setText(error_output)
                 # 报错时显示 failed 动作，停止移动
                 if self.parent_window:
-                    self.parent_window.is_moving = False
+                    self.parent_window._cancel_motion()
                     self.parent_window._update_bubble("发现错误！", PET_STATE_SAD)
             else:
                 self.error_text.setText("✅ 代码检查通过！没有发现语法错误。")
                 # 通过时显示 idle4 动作，停止移动
                 if self.parent_window:
-                    self.parent_window.is_moving = False
+                    self.parent_window._cancel_motion()
                     self.parent_window._set_state('idle4')
     
     def _check_with_ai(self, code):
@@ -1910,12 +1969,12 @@ class CodeCheckerDialog(QDialog):
         if passed:
             self.error_text.setText("✅ AI 检测通过！\n\n" + ai_message)
             if self.parent_window:
-                self.parent_window.is_moving = False
+                self.parent_window._cancel_motion()
                 self.parent_window._set_state('idle4')
         else:
             self.error_text.setText("🐛 AI 发现问题：\n\n" + ai_message)
             if self.parent_window:
-                self.parent_window.is_moving = False
+                self.parent_window._cancel_motion()
                 self.parent_window._update_bubble("发现错误！", PET_STATE_SAD)
 
     def _on_ai_check_error(self, error_message):
@@ -2725,11 +2784,6 @@ class ChatDialog(QDialog):
 # ============== 主程序 ==============
 def main():
     enable_per_monitor_dpi_awareness()
-    # These attributes must be set before QApplication is constructed. Without
-    # them, a per-monitor-aware Windows process mixes physical screen
-    # coordinates with Qt logical widget sizes and clips the pet at 150%/200%.
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     
