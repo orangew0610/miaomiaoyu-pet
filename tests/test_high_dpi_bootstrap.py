@@ -23,3 +23,13 @@ def test_pet_restores_fixed_logical_size_after_screen_change() -> None:
     assert "self.setFixedSize(self.pet_width, self.pet_height)" in source
     assert "self.pet_label.setFixedSize(self.pet_width, self.pet_height)" in source
     assert "handle.screenChanged.connect(self._on_screen_changed)" in source
+
+
+def test_frames_and_small_ui_use_physical_pixel_targets() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+
+    assert "rendered.setDevicePixelRatio" in source
+    assert "self.idle_movies.append((gif_name, frames))" in source
+    assert "font_size = self._physical_px(24, screen)" in source
+    assert "font_size = self._physical_px(22, screen)" in source
+    assert "self.bubble_label.setMaximumWidth(self._physical_px(520, screen))" in source

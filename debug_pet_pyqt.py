@@ -273,8 +273,13 @@ class PetWindow(QWidget):
             self.pet_label.setFixedSize(self.pet_width, self.pet_height)
             self._clamp_position()
             self.move(int(self.pet_x), int(self.pet_y))
+            self._switch_animation(self.current_state)
             if self.bubble_window.isVisible():
-                self._update_bubble_position()
+                message = self.bubble_label.text()
+                bubble_state = getattr(self, '_bubble_state_key', self.current_state)
+                if hasattr(self, '_update_bubble_position_timer'):
+                    self._update_bubble_position_timer.stop()
+                self._update_bubble(message, bubble_state)
 
         QTimer.singleShot(0, restore_logical_size)
     
@@ -301,8 +306,28 @@ class PetWindow(QWidget):
         for gif_name in GIF_FILES[PET_STATE_IDLE]:
             gif_path = os.path.join(GIF_DIR_FULL, gif_name)
             if os.path.exists(gif_path):
-                movie = QMovie(gif_path)
-                self.idle_movies.append((gif_name, movie))
+                try:
+                    image = Image.open(gif_path)
+                    frames = []
+                    try:
+                        while True:
+                            frame = image.copy().convert('RGBA').resize(
+                                (self.pet_physical_width, self.pet_physical_height),
+                                Image.Resampling.LANCZOS,
+                            )
+                            data = frame.tobytes('raw', 'RGBA')
+                            qimg = QImage(
+                                data, frame.width, frame.height,
+                                QImage.Format_RGBA8888,
+                            )
+                            frames.append(QPixmap.fromImage(qimg))
+                            image.seek(image.tell() + 1)
+                    except EOFError:
+                        pass
+                    if frames:
+                        self.idle_movies.append((gif_name, frames))
+                except Exception as error:
+                    print(f"[LOAD] idle failed: {gif_name}: {error}")
         
         print(f"[LOAD] 加载了 {len(self.idle_movies)} 个 idle 动画")
         
@@ -440,9 +465,9 @@ class PetWindow(QWidget):
         # 检查是否是 idle4
         if self.current_state == PET_STATE_IDLE and self.current_sub_index < len(self.idle_movies):
             name, movie = self.idle_movies[self.current_sub_index]
-            if name == 'idle4.gif' and isinstance(movie, list):
+            if isinstance(movie, list):
                 self.current_frame_index = (self.current_frame_index + 1) % len(movie)
-                self.pet_label.setPixmap(movie[self.current_frame_index])
+                self._display_pixmap(movie[self.current_frame_index])
                 return
         
         # 其他状态使用 all_frames
@@ -450,7 +475,13 @@ class PetWindow(QWidget):
             frames = self.all_frames[self.current_state]
             if frames:
                 self.current_frame_index = (self.current_frame_index + 1) % len(frames)
-                self.pet_label.setPixmap(frames[self.current_frame_index])
+                self._display_pixmap(frames[self.current_frame_index])
+
+    def _display_pixmap(self, pixmap):
+        """Map a cached physical frame 1:1 onto the current monitor."""
+        rendered = QPixmap(pixmap)
+        rendered.setDevicePixelRatio(max(1.0, self.devicePixelRatioF()))
+        self.pet_label.setPixmap(rendered)
     
     def _setup_timers(self):
         """设置定时器"""
@@ -501,12 +532,12 @@ class PetWindow(QWidget):
                 name, movie = self.idle_movies[self.current_sub_index]
                 
                 # 检查是否是 idle4（帧动画而不是 QMovie）
-                if name == 'idle4.gif' and isinstance(movie, list):
+                if isinstance(movie, list):
                     # idle4 使用帧动画
                     self.movie.stop()
                     self.frame_timer.start(100)
                     self.current_frame_index = 0
-                    self.pet_label.setPixmap(movie[0])
+                    self._display_pixmap(movie[0])
                     print(f"[ANIM] 切换到 idle4 (帧动画)")
                 else:
                     # 其他 idle 使用 QMovie
@@ -523,7 +554,7 @@ class PetWindow(QWidget):
             self.current_frame_index = 0
             frames = self.all_frames[state]
             if frames:
-                self.pet_label.setPixmap(frames[0])
+                self._display_pixmap(frames[0])
                 print(f"[ANIM] 切换到 {state}")
         else:
             # 没有帧，使用默认 idle
@@ -564,12 +595,12 @@ class PetWindow(QWidget):
                 name, movie = self.idle_movies[self.current_sub_index]
                 
                 # 检查是否是 idle4（帧动画而不是 QMovie）
-                if name == 'idle4.gif' and isinstance(movie, list):
+                if isinstance(movie, list):
                     # idle4 使用帧动画
                     self.movie.stop()
                     self.frame_timer.start(100)
                     self.current_frame_index = 0
-                    self.pet_label.setPixmap(movie[0])
+                    self._display_pixmap(movie[0])
                     print(f"[ANIM] 切换到 idle4 (帧动画)")
                 else:
                     # 其他 idle 使用 QMovie
@@ -639,6 +670,11 @@ class PetWindow(QWidget):
 
     def _desktop_rects(self):
         return [self._screen_rect(screen) for screen in QApplication.screens()]
+
+    def _physical_px(self, value, screen=None):
+        screen = screen or self._screen_for_position()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        return max(1, round(value / max(1.0, dpr)))
 
     def _screen_for_position(self, x=None, y=None, width=None, height=None):
         x = int(self.pet_x if x is None else x)
@@ -1228,15 +1264,23 @@ class PetWindow(QWidget):
         # 使用传入的 state 或当前状态
         state_key = state if state else self.current_state
         color = STATE_COLORS.get(state_key, "#F2F2F2")
+        self._bubble_state_key = state_key
+        screen = self._screen_for_position()
+        border = self._physical_px(3, screen)
+        radius = self._physical_px(18, screen)
+        pad_y = self._physical_px(12, screen)
+        pad_x = self._physical_px(18, screen)
+        font_size = self._physical_px(24, screen)
         
         print(f"[BUBBLE] 消息: {message[:20]}... | 状态: {state_key} | 颜色: {color}")
         
+        self.bubble_label.setMaximumWidth(self._physical_px(520, screen))
         self.bubble_label.setStyleSheet(f"""
             background-color: rgba(252, 232, 243, 0.92);
-            border: 3px solid {color};
-            border-radius: 18px;
-            padding: 12px 18px;
-            font-size: 24px;
+            border: {border}px solid {color};
+            border-radius: {radius}px;
+            padding: {pad_y}px {pad_x}px;
+            font-size: {font_size}px;
             font-weight: bold;
             color: #4A148C;
             font-family: 'Microsoft YaHei UI', 'SimHei';
@@ -1250,7 +1294,7 @@ class PetWindow(QWidget):
         
         # 设置气泡窗口位置（宠物上方居中）
         bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
-        bubble_y = int(self.pet_y) - label_height - 20
+        bubble_y = int(self.pet_y) - label_height - self._physical_px(20, screen)
         
         # 边界检查
         screen = self._screen_for_position(
@@ -1279,7 +1323,10 @@ class PetWindow(QWidget):
             label_height = self.bubble_label.height()
             
             bubble_x = int(self.pet_x) + (self.pet_width - label_width) // 2
-            bubble_y = int(self.pet_y) - label_height - 20
+            screen = self._screen_for_position()
+            bubble_y = (
+                int(self.pet_y) - label_height - self._physical_px(20, screen)
+            )
             
             screen = self._screen_for_position(
                 bubble_x, bubble_y, label_width, label_height
@@ -1444,34 +1491,48 @@ class PetWindow(QWidget):
         menu.setAttribute(Qt.WA_TranslucentBackground)
         menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         
-        menu.setStyleSheet("""
-            QMenu {
+        screen = self._screen_for_position()
+        border = self._physical_px(2, screen)
+        radius = self._physical_px(12, screen)
+        menu_pad_y = self._physical_px(8, screen)
+        menu_pad_x = self._physical_px(5, screen)
+        item_pad_y = self._physical_px(8, screen)
+        item_pad_right = self._physical_px(25, screen)
+        item_pad_left = self._physical_px(15, screen)
+        item_radius = self._physical_px(8, screen)
+        margin_y = self._physical_px(2, screen)
+        margin_x = self._physical_px(5, screen)
+        font_size = self._physical_px(22, screen)
+        separator_margin_y = self._physical_px(5, screen)
+        separator_margin_x = self._physical_px(15, screen)
+        menu.setStyleSheet(f"""
+            QMenu {{
                 background-color: rgba(252, 232, 243, 235);
-                border: 2px solid #F48FB1;
-                border-radius: 12px;
-                padding: 8px 5px;
-            }
-            QMenu::item {
+                border: {border}px solid #F48FB1;
+                border-radius: {radius}px;
+                padding: {menu_pad_y}px {menu_pad_x}px;
+            }}
+            QMenu::item {{
                 background-color: transparent;
-                padding: 8px 25px 8px 15px;
-                border-radius: 8px;
-                margin: 2px 5px;
-                font-size: 22px;
+                padding: {item_pad_y}px {item_pad_right}px {item_pad_y}px {item_pad_left}px;
+                border-radius: {item_radius}px;
+                margin: {margin_y}px {margin_x}px;
+                font-size: {font_size}px;
                 color: #4A148C;
-            }
-            QMenu::item:selected {
+            }}
+            QMenu::item:selected {{
                 background-color: rgba(244, 143, 177, 220);
                 color: #FFFFFF;
-            }
-            QMenu::item:disabled {
+            }}
+            QMenu::item:disabled {{
                 color: #9E9E9E;
                 font-weight: bold;
-            }
-            QMenu::separator {
+            }}
+            QMenu::separator {{
                 height: 1px;
                 background-color: rgba(206, 147, 216, 150);
-                margin: 5px 15px;
-            }
+                margin: {separator_margin_y}px {separator_margin_x}px;
+            }}
         """)
         
         # 菜单项
