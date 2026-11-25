@@ -121,8 +121,14 @@ class PetWindow(QWidget):
         # 宠物位置
         self.pet_x = 100
         self.pet_y = 100
-        self.pet_width = 300
-        self.pet_height = 300
+        # Keep the pet near 300 physical pixels on every monitor. Qt widget
+        # geometry is logical pixels once high-DPI mode is enabled.
+        self.pet_physical_width = 300
+        self.pet_physical_height = 300
+        initial_screen = QApplication.primaryScreen()
+        initial_dpr = initial_screen.devicePixelRatio() if initial_screen else 1.0
+        self.pet_width = max(1, round(self.pet_physical_width / initial_dpr))
+        self.pet_height = max(1, round(self.pet_physical_height / initial_dpr))
         
         # 移动相关
         self.is_moving = False
@@ -254,14 +260,19 @@ class PetWindow(QWidget):
             handle.screenChanged.connect(self._on_screen_changed)
             self._screen_change_connected = True
 
-    def _on_screen_changed(self, _screen):
+    def _on_screen_changed(self, screen):
         # Windows can preserve the old physical size during a monitor DPI
         # transition, shrinking Qt's logical top-level size and clipping the
         # still-300x300 animation label. Restore logical dimensions once the
         # screen transition has settled.
         def restore_logical_size():
+            dpr = screen.devicePixelRatio() if screen else 1.0
+            self.pet_width = max(1, round(self.pet_physical_width / dpr))
+            self.pet_height = max(1, round(self.pet_physical_height / dpr))
             self.setFixedSize(self.pet_width, self.pet_height)
             self.pet_label.setFixedSize(self.pet_width, self.pet_height)
+            self._clamp_position()
+            self.move(int(self.pet_x), int(self.pet_y))
             if self.bubble_window.isVisible():
                 self._update_bubble_position()
 
@@ -317,7 +328,10 @@ class PetWindow(QWidget):
                 # 加载移动帧（向右走不翻转）
                 walking_frames_right = []
                 for pil_frame in walking_pil_frames:
-                    frame = pil_frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                    frame = pil_frame.resize(
+                        (self.pet_physical_width, self.pet_physical_height),
+                        Image.Resampling.LANCZOS,
+                    )
                     frame = frame.convert('RGBA')
                     data = frame.tobytes('raw', 'RGBA')
                     qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
@@ -330,7 +344,10 @@ class PetWindow(QWidget):
                 walking_frames_left = []
                 for pil_frame in walking_pil_frames:
                     frame = pil_frame.transpose(Image.FLIP_LEFT_RIGHT)
-                    frame = frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                    frame = frame.resize(
+                        (self.pet_physical_width, self.pet_physical_height),
+                        Image.Resampling.LANCZOS,
+                    )
                     frame = frame.convert('RGBA')
                     data = frame.tobytes('raw', 'RGBA')
                     qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
@@ -343,7 +360,10 @@ class PetWindow(QWidget):
                 if idle4_pil_frames:
                     idle4_frames = []
                     for pil_frame in idle4_pil_frames:
-                        frame = pil_frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                        frame = pil_frame.resize(
+                            (self.pet_physical_width, self.pet_physical_height),
+                            Image.Resampling.LANCZOS,
+                        )
                         frame = frame.convert('RGBA')
                         data = frame.tobytes('raw', 'RGBA')
                         qimg = QImage(data, frame.width, frame.height, QImage.Format_RGBA8888)
@@ -384,7 +404,10 @@ class PetWindow(QWidget):
                                     frame = frame.transpose(Image.FLIP_LEFT_RIGHT)
                                 
                                 # 调整大小
-                                frame = frame.resize((self.pet_width, self.pet_height), Image.Resampling.LANCZOS)
+                                frame = frame.resize(
+                                    (self.pet_physical_width, self.pet_physical_height),
+                                    Image.Resampling.LANCZOS,
+                                )
                                 
                                 # 转换为 QPixmap
                                 if frame.mode == 'RGBA':

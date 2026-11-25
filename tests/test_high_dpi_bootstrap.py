@@ -16,6 +16,10 @@ def test_high_dpi_attributes_are_set_before_qapplication() -> None:
 def test_pet_restores_fixed_logical_size_after_screen_change() -> None:
     source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
 
+    assert "self.pet_physical_width = 300" in source
+    assert "self.pet_physical_height = 300" in source
+    assert "round(self.pet_physical_width / initial_dpr)" in source
+    assert "round(self.pet_physical_width / dpr)" in source
     assert "self.setFixedSize(self.pet_width, self.pet_height)" in source
     assert "self.pet_label.setFixedSize(self.pet_width, self.pet_height)" in source
     assert "handle.screenChanged.connect(self._on_screen_changed)" in source
