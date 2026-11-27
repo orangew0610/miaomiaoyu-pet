@@ -44,12 +44,13 @@
 
 - 1.x 设置依赖当前工作目录，打包后从不同目录启动会读写不同配置。
 - 默认是否上传代码没有独立配置，不能满足“默认不上传”。
-- 第二阶段已实现 SQLite 持久化记忆：真实 user/assistant 消息、UTC 时间戳、角色 ID、会话 ID、类型和事实来源。
-- 已实现 short_term、episodic、preference、summary 四类；偏好和情景记忆只由用户显式管理，不自动推断。
+- 第二阶段已实现 SQLite 持久化记忆：同一存档内的真实 user/assistant 消息自动保存，并保留 UTC 时间戳、角色 ID、会话 ID、类型和事实来源。
+- 已实现 short_term、episodic、preference、summary 四类；只有手动“新建对话”才生成新 session ID 和新上下文。
+- preference 表示稳定的偏好/习惯，episodic 表示具体经历/事件；管理页合并为一个“新增长期记忆”入口，避免用户面对两个语义相近的按钮。
 - FTS5 检索已启用；中文子串或 FTS 无结果时降级到参数化 LIKE。
 - 摘要采用抽取式原文切片并保存 source ID，不调用模型编造摘要。
 - 数据库与模型请求均通过工作线程执行；ChatDialog 初始化也异步恢复历史。
-- API Key 和 diagnostic code 字段不写入记忆库；聊天中用户主动发送的文本按真实用户消息保存。
+- API Key 和 diagnostic code 字段不写入记忆库；普通对话按当前 session ID 自动保存。
 
 ## 构建流程
 

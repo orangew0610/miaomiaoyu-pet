@@ -54,7 +54,8 @@ class MemoryService(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def search(self, character_id: str, query: str, limit: int = 8) -> list[MemoryEntry]:
+    def search(self, character_id: str, query: str, limit: int = 8,
+               session_id: str | None = None) -> list[MemoryEntry]:
         raise NotImplementedError
 
     @abstractmethod
@@ -188,23 +189,73 @@ class SQLiteMemoryService(MemoryService):
                             row["role"], row["content"], row["created_at"], row["kind"],
                             tuple(json.loads(row["source_ids"] or "[]"))) for row in rows]
 
-    def recent_messages(self, character_id: str, limit: int = 20) -> list[MemoryEntry]:
+    def recent_messages(self, character_id: str, limit: int = 20,
+                        session_id: str | None = None) -> list[MemoryEntry]:
         if not self.is_enabled(character_id):
             return []
+        session_sql = " AND session_id = ?" if session_id else ""
+        parameters: list[Any] = [character_id]
+        if session_id:
+            parameters.append(session_id)
+        parameters.append(limit)
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT * FROM memory_entries WHERE character_id = ? AND deleted_at IS NULL
                    AND kind = 'short_term' AND role IN ('user', 'assistant')
-                   ORDER BY id DESC LIMIT ?""", (character_id, limit)
+                """ + session_sql + " ORDER BY id DESC LIMIT ?", parameters
             ).fetchall()
         return list(reversed(self._rows_to_entries(rows)))
+
+    def latest_session_id(self, character_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT session_id FROM memory_entries
+                   WHERE character_id = ? AND deleted_at IS NULL
+                   AND ((kind = 'short_term' AND role IN ('user', 'assistant'))
+                        OR (kind IN ('preference', 'episodic')
+                            AND session_id != 'manual'))
+                   ORDER BY id DESC LIMIT 1""",
+                (character_id,),
+            ).fetchone()
+        return str(row["session_id"]) if row else None
+
+    def list_conversation_sessions(self, character_id: str,
+                                   limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT session_id,
+                          SUM(CASE WHEN kind = 'short_term' THEN 1 ELSE 0 END)
+                              AS message_count,
+                          MAX(id) AS last_id, MAX(created_at) AS updated_at
+                   FROM memory_entries
+                   WHERE character_id = ? AND deleted_at IS NULL
+                   AND ((kind = 'short_term' AND role IN ('user', 'assistant'))
+                        OR (kind IN ('preference', 'episodic')
+                            AND session_id != 'manual'))
+                   GROUP BY session_id ORDER BY last_id DESC LIMIT ?""",
+                (character_id, limit),
+            ).fetchall()
+            sessions = []
+            for row in rows:
+                preview = connection.execute(
+                    """SELECT content FROM memory_entries WHERE id = ?""",
+                    (row["last_id"],),
+                ).fetchone()
+                sessions.append({
+                    "session_id": str(row["session_id"]),
+                    "message_count": int(row["message_count"]),
+                    "updated_at": str(row["updated_at"]),
+                    "preview": str(preview["content"]) if preview else "",
+                })
+        return sessions
 
     @staticmethod
     def _query_terms(query: str) -> list[str]:
         return [term for term in re.findall(r"[\w\u4e00-\u9fff]+", query.lower())
                 if len(term) > 1][:12]
 
-    def search(self, character_id: str, query: str, limit: int = 8) -> list[MemoryEntry]:
+    def search(self, character_id: str, query: str, limit: int = 8,
+               session_id: str | None = None) -> list[MemoryEntry]:
         if not self.is_enabled(character_id):
             return []
         terms = self._query_terms(query)
@@ -212,14 +263,23 @@ class SQLiteMemoryService(MemoryService):
             return []
         with self._connect() as connection:
             rows: list[sqlite3.Row] = []
+            scope_sql = (
+                " AND (m.kind NOT IN ('preference', 'episodic') "
+                "OR m.session_id = 'manual' OR m.session_id = ?)"
+                if session_id else
+                " AND (m.kind NOT IN ('preference', 'episodic') "
+                "OR m.session_id = 'manual')"
+            )
+            scope_parameters = (session_id,) if session_id else ()
             if self._fts_available:
                 match = " OR ".join(f'"{term}"' for term in terms)
                 try:
                     rows = connection.execute(
-                        """SELECT m.* FROM memory_fts f JOIN memory_entries m ON m.id = f.rowid
+                        f"""SELECT m.* FROM memory_fts f JOIN memory_entries m ON m.id = f.rowid
                            WHERE memory_fts MATCH ? AND m.character_id = ? AND m.deleted_at IS NULL
+                           {scope_sql}
                            ORDER BY bm25(memory_fts), m.id DESC LIMIT ?""",
-                        (match, character_id, limit),
+                        (match, character_id, *scope_parameters, limit),
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
@@ -227,10 +287,12 @@ class SQLiteMemoryService(MemoryService):
             # A no-hit FTS query therefore falls back to safe substring search.
             if not rows:
                 clauses = " OR ".join("content LIKE ?" for _ in terms)
+                plain_scope_sql = scope_sql.replace("m.", "")
                 rows = connection.execute(
                     f"""SELECT * FROM memory_entries WHERE character_id = ? AND deleted_at IS NULL
-                         AND ({clauses}) ORDER BY id DESC LIMIT ?""",
-                    (character_id, *(f"%{term}%" for term in terms), limit),
+                         AND ({clauses}) {plain_scope_sql} ORDER BY id DESC LIMIT ?""",
+                    (character_id, *(f"%{term}%" for term in terms),
+                     *scope_parameters, limit),
                 ).fetchall()
         return self._rows_to_entries(rows)
 
@@ -275,6 +337,25 @@ class SQLiteMemoryService(MemoryService):
                 self._invalidate_summaries(connection, character_id, entry_id)
         return cursor.rowcount == 1
 
+    def delete_conversation_session(self, character_id: str, session_id: str) -> int:
+        """Soft-delete one conversation save and summaries derived from it."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE memory_entries SET deleted_at = ?
+                   WHERE character_id = ? AND session_id = ?
+                   AND kind IN ('short_term', 'preference', 'episodic')
+                   AND deleted_at IS NULL""",
+                (utc_now(), character_id, session_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    """UPDATE memory_entries SET deleted_at = ?
+                       WHERE character_id = ? AND kind = 'summary'
+                       AND deleted_at IS NULL""",
+                    (utc_now(), character_id),
+                )
+        return cursor.rowcount
+
     def _invalidate_summaries(self, connection: sqlite3.Connection,
                               character_id: str, source_id: int) -> None:
         summaries = connection.execute(
@@ -300,10 +381,13 @@ class SQLiteMemoryService(MemoryService):
             )
         return cursor.rowcount
 
-    def add_user_memory(self, character_id: str, content: str, kind: str) -> MemoryEntry:
+    def add_user_memory(self, character_id: str, content: str, kind: str,
+                        session_id: str | None = None) -> MemoryEntry:
         if kind not in {"episodic", "preference"}:
             raise ValueError("user-managed memory must be episodic or preference")
-        return self.add_message(character_id, "manual", "user", content, kind=kind)
+        return self.add_message(
+            character_id, session_id or "manual", "user", content, kind=kind
+        )
 
     def _ensure_extractive_summary(self, character_id: str,
                                    recent_ids: set[int]) -> MemoryEntry | None:
@@ -333,17 +417,29 @@ class SQLiteMemoryService(MemoryService):
         return max(1, (len(text) + 2) // 3)
 
     def build_context(self, character_id: str, current_query: str,
-                      character_prompt: str, *, budget_tokens: int = 3000) -> ContextBundle:
+                      character_prompt: str, *, budget_tokens: int = 3000,
+                      session_id: str | None = None) -> ContextBundle:
         if not self.is_enabled(character_id):
             messages = ({"role": "user", "content": current_query},)
             return ContextBundle(character_prompt, messages, (),
                                  self._estimate_tokens(character_prompt + current_query))
-        recent = self.recent_messages(character_id, limit=16)
+        recent = self.recent_messages(
+            character_id, limit=16, session_id=session_id
+        )
         recent_ids = {entry.id for entry in recent}
         summary = self._ensure_extractive_summary(character_id, recent_ids)
-        relevant = [entry for entry in self.search(character_id, current_query, 10)
-                    if entry.id not in recent_ids]
-        managed = self.list_entries(character_id, kinds=("preference", "episodic"), limit=20)
+        relevant = [entry for entry in self.search(
+            character_id, current_query, 10, session_id=session_id
+        )
+                    if entry.id not in recent_ids and (
+                        not session_id or entry.kind != "short_term"
+                    )]
+        managed = [
+            entry for entry in self.list_entries(
+                character_id, kinds=("preference", "episodic"), limit=100
+            )
+            if entry.session_id == "manual" or entry.session_id == session_id
+        ][:20]
         candidates: list[MemoryEntry] = []
         seen: set[int] = set()
         for entry in [*managed, *relevant, *([summary] if summary else [])]:
@@ -389,13 +485,18 @@ class NullMemoryService(MemoryService):
                     kind="short_term", source_ids=()):
         return MemoryEntry(0, character_id, session_id, role, content, utc_now(), kind)
 
-    def recent_messages(self, character_id: str, limit: int = 20) -> list[MemoryEntry]:
+    def recent_messages(self, character_id: str, limit: int = 20,
+                        session_id: str | None = None) -> list[MemoryEntry]:
         return []
 
-    def search(self, character_id: str, query: str, limit: int = 8) -> list[MemoryEntry]:
+    def search(self, character_id: str, query: str, limit: int = 8,
+               session_id: str | None = None) -> list[MemoryEntry]:
         return []
 
     def build_context(self, character_id, current_query, character_prompt, *,
-                      budget_tokens=3000):
+                      budget_tokens=3000, session_id=None):
         return ContextBundle(character_prompt,
                              ({"role": "user", "content": current_query},), (), 0)
+
+    def delete_conversation_session(self, character_id, session_id):
+        return 0

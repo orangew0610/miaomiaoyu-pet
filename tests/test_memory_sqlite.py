@@ -18,6 +18,74 @@ def test_messages_persist_across_service_instances(tmp_path) -> None:
     assert all(item.created_at for item in restored)
 
 
+def test_messages_share_a_session_until_a_new_save_is_created(tmp_path) -> None:
+    database = tmp_path / "memory.sqlite3"
+    service = SQLiteMemoryService(database)
+    service.add_message("miaomiao", "save-one", "user", "今天看到了海鸥")
+    service.add_message("miaomiao", "save-one", "assistant", "下次带我一起去。")
+
+    assert [item.content for item in service.recent_messages(
+        "miaomiao", session_id="save-one"
+    )] == [
+        "今天看到了海鸥", "下次带我一起去。",
+    ]
+    assert service.latest_session_id("miaomiao") == "save-one"
+    sessions = service.list_conversation_sessions("miaomiao")
+    assert len(sessions) == 1
+    assert sessions[0]["message_count"] == 2
+
+    service.add_message("miaomiao", "save-two", "user", "这是新存档")
+    assert service.latest_session_id("miaomiao") == "save-two"
+    assert [item.content for item in service.recent_messages(
+        "miaomiao", session_id="save-two"
+    )] == ["这是新存档"]
+    assert len(service.list_conversation_sessions("miaomiao")) == 2
+
+
+def test_one_conversation_save_can_be_deleted_without_affecting_others(tmp_path) -> None:
+    service = SQLiteMemoryService(tmp_path / "memory.sqlite3")
+    service.add_message("miaomiao", "save-one", "user", "保留我")
+    service.add_message("miaomiao", "save-two", "user", "删除我")
+    scoped = service.add_user_memory(
+        "miaomiao", "跟随存档删除", "episodic", session_id="save-two"
+    )
+
+    assert service.delete_conversation_session("miaomiao", "save-two") == 2
+    assert service.recent_messages("miaomiao", session_id="save-two") == []
+    assert [entry.content for entry in service.recent_messages(
+        "miaomiao", session_id="save-one"
+    )] == ["保留我"]
+    assert scoped.id not in {
+        entry.id for entry in service.list_entries("miaomiao")
+    }
+    assert [item["session_id"] for item in service.list_conversation_sessions(
+        "miaomiao"
+    )] == ["save-one"]
+
+
+def test_scoped_long_term_memory_is_only_injected_into_its_save(tmp_path) -> None:
+    service = SQLiteMemoryService(tmp_path / "memory.sqlite3")
+    general = service.add_user_memory(
+        "miaomiao", "通用喜欢海边", "preference"
+    )
+    scoped = service.add_user_memory(
+        "miaomiao", "只在存档一喜欢草莓", "preference", session_id="save-one"
+    )
+
+    save_one = service.build_context(
+        "miaomiao", "我喜欢什么", "角色", session_id="save-one"
+    )
+    save_two = service.build_context(
+        "miaomiao", "我喜欢什么", "角色", session_id="save-two"
+    )
+
+    assert general.id in save_one.injected_memory_ids
+    assert general.id in save_two.injected_memory_ids
+    assert scoped.id in save_one.injected_memory_ids
+    assert scoped.id not in save_two.injected_memory_ids
+    assert service.latest_session_id("miaomiao") == "save-one"
+
+
 def test_character_memories_are_isolated(tmp_path) -> None:
     service = SQLiteMemoryService(tmp_path / "memory.sqlite3")
     service.add_message("miaomiao", "one", "user", "只属于喵喵鱼的秘密")

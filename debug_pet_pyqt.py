@@ -1217,8 +1217,8 @@ class PetWindow(QWidget):
         self.qi_yu_quotes = {
             'morning': [
                 '早啊，某位喜欢赖床的保镖小姐。',
-                '今天的阳光不错，适合画一幅关于你的画。',
-                '早饭吃了吗？没吃的话——我可不会给你做。',
+                '今天的阳光不错，适合画一幅关于太阳，海风和你的画。',
+                '早饭吃了吗？没吃的话——要不要尝尝我做的爱心煎蛋？',
                 '新的一天开始了，要不要一起去海边看日出？',
                 '昨晚睡得好吗？我可是画了一整夜的画。'
             ],
@@ -1227,7 +1227,7 @@ class PetWindow(QWidget):
                 '要不要一起去吃烧烤？我知道一家不错的店。',
                 '午休时间，借你靠一会儿——就一小会儿。',
                 '今天中午的阳光太刺眼了，还是待在画室里比较舒服。',
-                '有人的肚子叫了哦，要不要我去给你买点吃的？'
+                '有人的肚子叫了哦，祁大厨特供午餐马上出餐。'
             ],
             'afternoon': [
                 '下午好，我的灵感源泉。',
@@ -1239,9 +1239,9 @@ class PetWindow(QWidget):
             'evening': [
                 '晚上好，宝宝。今天过得怎么样？',
                 '今晚的星星还没你上次打翻我颜料罐时瞪我的眼睛亮。',
-                '要不要一起去吃晚饭？我请客。',
+                '要不要一起去吃晚饭？我知道一家不错的海鲜餐厅。',
                 '夜幕降临后，你似乎比白天时要坦率得多。',
-                '今天辛苦了，要不要靠在我肩上休息一会儿？',
+                '今天辛苦了，靠在我肩上休息一会儿？',
                 '下班后打算去哪？你的专属司机随时待命。'
             ],
             'night': [
@@ -1257,7 +1257,7 @@ class PetWindow(QWidget):
                 '某人今天很忙嘛，消息都沉底了。',
                 '我等你等了好久，你终于想起我了？',
                 '今天画廊会有一幅名叫《消失的宝宝》的新展品，嫌疑人的特征与某人的日程高度吻合。',
-                '又不理我？看来我得画一幅《被遗忘的海神》了。',
+                '又不理我？看来我得画一幅《被遗忘的小红》了。',
                 '你再不来陪我，我就要把自己关在画室里三天三夜！',
                 '明明可以清楚地看看我，为什么还要效仿盲人摸象？',
                 '我挠挠挠......挠挠挠......',
@@ -1268,7 +1268,7 @@ class PetWindow(QWidget):
                 '最近天气凉了不少，是该多加些衣服了。',
                 '想吃冰淇淋吗？我去买。',
                 '折一个纸蜻蜓就能让你高兴这么久，你还真是好哄。',
-                '我的脸都被你戳红了，应该拿你怎么办呢？',
+                '我的脸都被你戳红了，打算怎么补偿我？',
                 '要不要跟我去个地方？',
                 '你看起来不是很精神……是我的错觉，还是你没休息好？',
                 '除了触摸要不要换种感受方式？',
@@ -1454,9 +1454,9 @@ class PetWindow(QWidget):
             self.pet_x = int(data['end_x'])
             self.pet_y = int(data['end_y'])
             self._place_pet_window(self.pet_x, self.pet_y)
-            self._set_state(PET_STATE_IDLE)
             self.parabola_timer.stop()
-            self._finish_motion(token)
+            if self._finish_motion(token):
+                self._set_state(PET_STATE_IDLE)
             return
         
         t = data['current_step'] / data['steps']
@@ -2510,13 +2510,19 @@ class SettingsDialog(QDialog):
 class MemoryDialog(QDialog):
     """Manage one character's persisted memories without blocking the UI."""
 
-    def __init__(self, memory_service, character_id, parent=None):
+    session_switch_requested = pyqtSignal(str)
+    active_session_reset = pyqtSignal(str)
+
+    def __init__(
+        self, memory_service, character_id, parent=None, active_session_id=None
+    ):
         super().__init__(parent)
         self.memory_service = memory_service
         self.character_id = character_id
+        self.active_session_id = active_session_id
         self.workers = []
         self.setWindowTitle("🧠 记忆管理")
-        self.resize(820, 520)
+        self.resize(900, 680)
         self._init_ui()
         self._reload()
 
@@ -2525,28 +2531,69 @@ class MemoryDialog(QDialog):
         self.status_label = QLabel("正在读取记忆……")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["ID", "类型", "时间", "内容"])
+        explanation = QLabel(
+            "偏好/习惯：长期稳定的喜好或习惯；经历/事件：具体发生过的事情。"
+            "对话会自动保存到当前存档，只有“新建对话”才创建新存档。"
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        layout.addWidget(QLabel("对话存档"))
+        self.conversation_table = QTableWidget(0, 4)
+        self.conversation_table.setHorizontalHeaderLabels(
+            ["存档", "更新时间", "消息数", "最后内容"]
+        )
+        self.conversation_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.conversation_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.conversation_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.conversation_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.conversation_table.setColumnWidth(0, 120)
+        self.conversation_table.setColumnWidth(1, 180)
+        self.conversation_table.setColumnWidth(2, 90)
+        self.conversation_table.setMinimumHeight(150)
+        self.conversation_table.doubleClicked.connect(self._switch_conversation)
+        layout.addWidget(self.conversation_table)
+
+        conversation_buttons = QHBoxLayout()
+        for label, callback in (
+            ("切换到选中存档", self._switch_conversation),
+            ("删除选中存档", self._delete_conversation),
+        ):
+            button = QPushButton(label)
+            button.setAutoDefault(False)
+            button.setDefault(False)
+            button.clicked.connect(callback)
+            conversation_buttons.addWidget(button)
+        conversation_buttons.addStretch()
+        layout.addLayout(conversation_buttons)
+
+        layout.addWidget(QLabel("长期记忆"))
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["ID", "类型", "范围", "时间", "内容"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 60)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(2, 110)
+        self.table.setColumnWidth(3, 180)
         layout.addWidget(self.table)
 
         buttons = QHBoxLayout()
         for label, callback in (
-            ("新增偏好", lambda: self._add_memory("preference")),
-            ("新增情景", lambda: self._add_memory("episodic")),
-            ("保存编辑", self._save_selected),
+            ("新增长期记忆", self._add_memory),
             ("删除选中", self._delete_selected),
             ("清空本角色", self._clear_all),
         ):
             button = QPushButton(label)
+            button.setAutoDefault(False)
+            button.setDefault(False)
             button.clicked.connect(callback)
             buttons.addWidget(button)
         self.enabled_button = QPushButton("记忆已启用")
+        self.enabled_button.setAutoDefault(False)
+        self.enabled_button.setDefault(False)
         self.enabled_button.setCheckable(True)
         self.enabled_button.clicked.connect(self._toggle_enabled)
         buttons.addWidget(self.enabled_button)
@@ -2569,52 +2616,146 @@ class MemoryDialog(QDialog):
 
     def _load_data(self):
         return (
-            self.memory_service.list_entries(self.character_id, limit=300),
+            self.memory_service.list_entries(
+                self.character_id,
+                kinds=("preference", "episodic", "summary"),
+                limit=300,
+            ),
             self.memory_service.is_enabled(self.character_id),
+            self.memory_service.list_conversation_sessions(self.character_id),
         )
 
     def _reload(self):
         self._run_async(self._load_data, self._show_entries)
 
     def _show_entries(self, result):
-        entries, enabled = result
-        self.table.setRowCount(len(entries))
-        for row, entry in enumerate(entries):
-            values = [str(entry.id), entry.kind, entry.created_at, entry.content]
+        entries, enabled, sessions = result
+        visible_sessions = list(sessions)
+        if self.active_session_id and not any(
+            session["session_id"] == self.active_session_id
+            for session in visible_sessions
+        ):
+            visible_sessions.insert(0, {
+                "session_id": self.active_session_id,
+                "message_count": 0,
+                "updated_at": "尚无消息",
+                "preview": "新建后尚未发送消息",
+            })
+        self.conversation_table.setRowCount(len(visible_sessions))
+        archive_number = 1
+        session_labels = {}
+        for row, session in enumerate(visible_sessions):
+            is_active = session["session_id"] == self.active_session_id
+            name = "当前存档" if is_active else f"存档 {archive_number}"
+            if not is_active:
+                archive_number += 1
+            session_labels[session["session_id"]] = name
+            values = [name, session["updated_at"], str(session["message_count"]), session["preview"]]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if column != 3:
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if column == 0:
+                    item.setData(Qt.UserRole, session["session_id"])
+                self.conversation_table.setItem(row, column, item)
+
+        self.table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            kind_label = {
+                "preference": "偏好/习惯",
+                "episodic": "经历/事件",
+                "short_term": "已存对话",
+                "summary": "历史摘要",
+            }.get(entry.kind, entry.kind)
+            scope_label = (
+                "通用" if entry.session_id == "manual"
+                else session_labels.get(entry.session_id, "未列出的存档")
+            )
+            values = [
+                str(entry.id), kind_label, scope_label,
+                entry.created_at, entry.content,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
                 self.table.setItem(row, column, item)
         self.enabled_button.setChecked(enabled)
         self.enabled_button.setText("记忆已启用" if enabled else "记忆已关闭")
-        self.status_label.setText(f"共 {len(entries)} 条；不同角色的数据彼此隔离。")
+        self.status_label.setText(
+            f"对话存档 {len(visible_sessions)} 个；长期记忆 {len(entries)} 条。"
+            "不同角色的数据彼此隔离。"
+        )
 
     def _selected(self):
         row = self.table.currentRow()
         if row < 0:
             self.status_label.setText("请先选择一条记忆。")
             return None
-        return int(self.table.item(row, 0).text()), self.table.item(row, 3).text()
+        return int(self.table.item(row, 0).text())
 
-    def _add_memory(self, kind):
-        label = "用户偏好" if kind == "preference" else "情景记忆"
-        content, accepted = QInputDialog.getMultiLineText(self, f"新增{label}", "内容：")
+    def _selected_conversation_id(self):
+        row = self.conversation_table.currentRow()
+        if row < 0:
+            self.status_label.setText("请先选择一个对话存档。")
+            return None
+        item = self.conversation_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _switch_conversation(self, _index=None):
+        session_id = self._selected_conversation_id()
+        if not session_id:
+            return
+        if session_id == self.active_session_id:
+            self.status_label.setText("这已经是当前存档。")
+            return
+        self.session_switch_requested.emit(session_id)
+        self.accept()
+
+    def _delete_conversation(self):
+        session_id = self._selected_conversation_id()
+        if not session_id:
+            return
+        if QMessageBox.question(
+            self,
+            "删除对话存档",
+            "删除后该存档的对话将无法恢复，确认继续？",
+        ) != QMessageBox.Yes:
+            return
+        was_active = session_id == self.active_session_id
+
+        def deleted(_count):
+            if was_active:
+                self.active_session_id = str(uuid.uuid4())
+                self.active_session_reset.emit(self.active_session_id)
+            self._reload()
+
+        self._run_async(
+            lambda: self.memory_service.delete_conversation_session(
+                self.character_id, session_id
+            ),
+            deleted,
+        )
+
+    def _add_memory(self):
+        labels = ["偏好/习惯", "经历/事件"]
+        selected, accepted = QInputDialog.getItem(
+            self, "新增长期记忆", "记忆类型：", labels, 0, False
+        )
+        if not accepted:
+            return
+        kind = "preference" if selected == labels[0] else "episodic"
+        scopes = ["通用（该角色所有存档）", "仅当前存档"]
+        scope, accepted = QInputDialog.getItem(
+            self, "新增长期记忆", "使用范围：", scopes, 0, False
+        )
+        if not accepted:
+            return
+        session_id = None if scope == scopes[0] else self.active_session_id
+        content, accepted = QInputDialog.getMultiLineText(
+            self, "新增长期记忆", "内容："
+        )
         if accepted and content.strip():
             self._run_async(
                 lambda: self.memory_service.add_user_memory(
-                    self.character_id, content.strip(), kind
-                ),
-                lambda _result: self._reload(),
-            )
-
-    def _save_selected(self):
-        selected = self._selected()
-        if selected:
-            entry_id, content = selected
-            self._run_async(
-                lambda: self.memory_service.update_entry(
-                    entry_id, self.character_id, content
+                    self.character_id, content.strip(), kind,
+                    session_id=session_id,
                 ),
                 lambda _result: self._reload(),
             )
@@ -2624,9 +2765,8 @@ class MemoryDialog(QDialog):
         if selected and QMessageBox.question(
             self, "删除记忆", "删除后不会再注入后续模型请求。确认删除？"
         ) == QMessageBox.Yes:
-            entry_id, _content = selected
             self._run_async(
-                lambda: self.memory_service.delete_entry(entry_id, self.character_id),
+                lambda: self.memory_service.delete_entry(selected, self.character_id),
                 lambda _result: self._reload(),
             )
 
@@ -2634,9 +2774,13 @@ class MemoryDialog(QDialog):
         if QMessageBox.question(
             self, "清空记忆", "确认清空当前角色的全部记忆？"
         ) == QMessageBox.Yes:
+            def cleared(_result):
+                self.active_session_id = str(uuid.uuid4())
+                self.active_session_reset.emit(self.active_session_id)
+                self._reload()
+
             self._run_async(
-                lambda: self.memory_service.clear(self.character_id),
-                lambda _result: self._reload(),
+                lambda: self.memory_service.clear(self.character_id), cleared
             )
 
     def _toggle_enabled(self, checked):
@@ -2706,9 +2850,19 @@ class ChatDialog(QDialog):
         title_layout.addWidget(title)
         title_layout.addStretch()
         self.memory_button = QPushButton("🧠 记忆")
+        self.memory_button.setAutoDefault(False)
+        self.memory_button.setDefault(False)
         self.memory_button.setEnabled(False)
         self.memory_button.clicked.connect(self._show_memory_manager)
         title_layout.addWidget(self.memory_button)
+        self.new_conversation_button = QPushButton("新建对话")
+        self.new_conversation_button.setAutoDefault(False)
+        self.new_conversation_button.setDefault(False)
+        self.new_conversation_button.setEnabled(False)
+        self.new_conversation_button.clicked.connect(
+            self._start_new_conversation
+        )
+        title_layout.addWidget(self.new_conversation_button)
         layout.addLayout(title_layout)
 
         # 对话历史区域
@@ -2764,9 +2918,14 @@ class ChatDialog(QDialog):
             }
         """)
         self.input_text.returnPressed.connect(self._send_message)
+        self.input_text.setToolTip(
+            "按 Enter 发送消息；消息会自动保存到当前对话存档。"
+        )
         input_layout.addWidget(self.input_text)
 
         send_btn = QPushButton("发送")
+        send_btn.setAutoDefault(False)
+        send_btn.setDefault(False)
         send_btn.setMinimumSize(100, 45)
         send_btn.setStyleSheet("""
             QPushButton {
@@ -2800,7 +2959,17 @@ class ChatDialog(QDialog):
 
     def _load_memory(self):
         service = SQLiteMemoryService()
-        return service, service.recent_messages(self.model_config.character_id, limit=20)
+        session_id = service.latest_session_id(self.model_config.character_id)
+        session_id = session_id or str(uuid.uuid4())
+        return (
+            service,
+            session_id,
+            service.recent_messages(
+                self.model_config.character_id,
+                limit=20,
+                session_id=session_id,
+            ),
+        )
 
     def _restore_memory_async(self):
         self.memory_worker = ApiRequestWorker(self._load_memory, self)
@@ -2810,7 +2979,7 @@ class ChatDialog(QDialog):
         self.memory_worker.start()
 
     def _on_memory_restored(self, result):
-        self.memory_service, entries = result
+        self.memory_service, self.session_id, entries = result
         self.message_history = [
             {"role": entry.role, "content": entry.content} for entry in entries
         ]
@@ -2827,6 +2996,7 @@ class ChatDialog(QDialog):
             )
         self.send_btn.setEnabled(True)
         self.memory_button.setEnabled(True)
+        self.new_conversation_button.setEnabled(True)
 
     def _on_memory_restore_failed(self, error_message):
         self.memory_service = NullMemoryService()
@@ -2834,6 +3004,7 @@ class ChatDialog(QDialog):
             self._make_error_bubble(f"记忆库暂时不可用：{error_message}")
         )
         self.send_btn.setEnabled(True)
+        self.new_conversation_button.setEnabled(True)
 
     def _finish_memory_restore(self):
         if self.memory_worker:
@@ -2842,11 +3013,82 @@ class ChatDialog(QDialog):
 
     def _show_memory_manager(self):
         if self.memory_service:
-            MemoryDialog(
+            dialog = MemoryDialog(
                 self.memory_service,
                 self.model_config.character_id,
                 self,
-            ).exec_()
+                active_session_id=self.session_id,
+            )
+            dialog.session_switch_requested.connect(self._switch_conversation)
+            dialog.active_session_reset.connect(self._reset_to_empty_session)
+            dialog.exec_()
+
+    def _reset_to_empty_session(self, session_id=None):
+        self.session_id = session_id or str(uuid.uuid4())
+        self.message_history = []
+        self.chat_history.clear()
+        self.chat_history.append(
+            self._make_ai_bubble("对话存档已清除。我们重新开始吧。")
+        )
+        self.input_text.clear()
+        self.input_text.setFocus()
+
+    def _switch_conversation(self, session_id):
+        if self.request_worker:
+            QMessageBox.information(self, "请稍候", "等当前回复完成后再切换存档。")
+            return
+        self.send_btn.setEnabled(False)
+        self.memory_button.setEnabled(False)
+        self.memory_worker = ApiRequestWorker(
+            lambda: self.memory_service.recent_messages(
+                self.model_config.character_id,
+                limit=20,
+                session_id=session_id,
+            ),
+            self,
+        )
+
+        def switched(entries):
+            self.session_id = session_id
+            self.message_history = [
+                {"role": entry.role, "content": entry.content} for entry in entries
+            ]
+            self.chat_history.clear()
+            for entry in entries:
+                self.chat_history.append(
+                    self._make_user_bubble(entry.content)
+                    if entry.role == "user"
+                    else self._make_ai_bubble(entry.content)
+                )
+            self.chat_history.append(self._make_ai_bubble("已切换到这个对话存档。"))
+
+        self.memory_worker.succeeded.connect(switched)
+        self.memory_worker.failed.connect(self._on_memory_restore_failed)
+        self.memory_worker.finished.connect(self._finish_memory_restore)
+        self.memory_worker.finished.connect(lambda: self.send_btn.setEnabled(True))
+        self.memory_worker.finished.connect(lambda: self.memory_button.setEnabled(True))
+        self.memory_worker.start()
+
+    def _start_new_conversation(self):
+        if self.request_worker:
+            QMessageBox.information(
+                self, "请稍候", "等当前回复完成后再新建对话。"
+            )
+            return
+        if self.message_history and QMessageBox.question(
+            self,
+            "新建对话",
+            "当前对话已自动保存。新建后将开启独立的对话上下文，继续吗？",
+        ) != QMessageBox.Yes:
+            return
+        self.session_id = str(uuid.uuid4())
+        self.message_history = []
+        self.chat_history.clear()
+        self.chat_history.append(
+            self._make_ai_bubble("新存档建好了。这次想从哪里开始？")
+        )
+        self.input_text.clear()
+        self.input_text.setFocus()
 
     def _make_user_bubble(self, text):
         """生成用户消息气泡（右侧，蓝色系）"""
@@ -2899,7 +3141,7 @@ class ChatDialog(QDialog):
     def _send_message(self):
         """发送消息"""
         message = self.input_text.text().strip()
-        if not message or not self.memory_service:
+        if not message or not self.memory_service or self.request_worker:
             return
 
         # 添加用户消息气泡到历史
@@ -2947,6 +3189,7 @@ class ChatDialog(QDialog):
                 message,
                 qi_yu_prompt,
                 budget_tokens=self.model_config.context_budget_tokens,
+                session_id=self.session_id,
             )
             result = client.chat(context.system_prompt, context.messages)
             self.memory_service.add_message(

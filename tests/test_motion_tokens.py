@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from debug_pet_pyqt import (
     QApplication,
     PET_STATE_HAPPY,
+    PET_STATE_IDLE,
+    PET_STATE_JUMPING_RIGHT,
     PET_STATE_WALKING_RIGHT,
     PetWindow,
 )
@@ -50,6 +52,36 @@ def test_cancel_motion_invalidates_callbacks_and_stops_inertia_timer() -> None:
     assert subject._motion_mode is None
     assert not subject.is_moving
     assert subject.parabola_timer.stopped
+
+
+def test_parabola_landing_finishes_motion_before_switching_to_idle() -> None:
+    switched = []
+    subject = SimpleNamespace(
+        parabola_data={
+            "motion_token": 4,
+            "current_step": 29,
+            "steps": 30,
+            "end_x": 120,
+            "end_y": 500,
+        },
+        parabola_timer=FakeTimer(),
+        _motion_token=4,
+        _motion_mode="parabola",
+        is_moving=True,
+        current_state=PET_STATE_JUMPING_RIGHT,
+        _place_pet_window=lambda _x, _y: None,
+        _switch_animation=switched.append,
+    )
+    subject._finish_motion = lambda token: PetWindow._finish_motion(subject, token)
+    subject._set_state = lambda state: PetWindow._set_state(subject, state)
+
+    PetWindow._animate_parabola(subject)
+
+    assert subject.parabola_timer.stopped
+    assert subject._motion_mode is None
+    assert not subject.is_moving
+    assert subject.current_state == PET_STATE_IDLE
+    assert switched == [PET_STATE_IDLE]
 
 
 def test_non_motion_emotion_cannot_replace_active_walk_animation() -> None:
