@@ -1256,7 +1256,7 @@ class PetWindow(QWidget):
                 '怎么才想起来找我，是什么把你的注意力吸引走了？',
                 '某人今天很忙嘛，消息都沉底了。',
                 '我等你等了好久，你终于想起我了？',
-                '今天画廊会有一幅名叫《消失的宝宝》的新展品，嫌疑人的特征与某人的日程高度吻合。',
+                '今天画廊会有一幅名叫《宝宝在哪里》的新展品，嫌疑人的特征与某人的日程高度吻合。',
                 '又不理我？看来我得画一幅《被遗忘的小红》了。',
                 '你再不来陪我，我就要把自己关在画室里三天三夜！',
                 '明明可以清楚地看看我，为什么还要效仿盲人摸象？',
@@ -3162,7 +3162,7 @@ class ChatDialog(QDialog):
         if os.path.exists(prompt_path):
             try:
                 with open(prompt_path, 'r', encoding='utf-8') as f:
-                    return f.read() + "\n\n请遵守核心任务与对话规范，符合祁煜人物设定，参考对话风格与语气，参考祁煜语录汇总。用祁煜的口吻回复以下对话："
+                    return f.read()
             except Exception:
                 pass
         return None
@@ -3174,6 +3174,18 @@ class ChatDialog(QDialog):
             self.chat_history.append(self._make_error_bubble("我的剧本好像丢了……"))
             self.send_btn.setEnabled(True)
             return
+
+        scene = self._conversation_scene(message)
+        scene_instruction = self._scene_instruction(scene)
+        local_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        runtime_prompt = (
+            f"{qi_yu_prompt}\n\n## 当前运行时语境\n"
+            f"- 本地时间：{local_time}\n"
+            f"- 对话场景：{scene}\n"
+            f"- 本场景执行规则：{scene_instruction}\n"
+            "请按场景规则自然回应。语料库只用于理解语感，"
+            "不要直接复读，不要无缘由地调情。"
+        )
 
         client = ModelApiClient(self.model_config, self.api_key)
 
@@ -3187,7 +3199,7 @@ class ChatDialog(QDialog):
             context = self.memory_service.build_context(
                 self.model_config.character_id,
                 message,
-                qi_yu_prompt,
+                runtime_prompt,
                 budget_tokens=self.model_config.context_budget_tokens,
                 session_id=self.session_id,
             )
@@ -3208,6 +3220,56 @@ class ChatDialog(QDialog):
         self.request_worker.failed.connect(self._on_chat_error)
         self.request_worker.finished.connect(self._finish_chat_request)
         self.request_worker.start()
+
+    @staticmethod
+    def _conversation_scene(message):
+        text = message.lower()
+        scene_terms = (
+            ("技术、Debug 或工作", (
+                "代码", "报错", "bug", "debug", "python", "java", "api",
+                "程序", "函数", "编译", "测试", "工作", "项目",
+            )),
+            ("艺术、色彩或创作", (
+                "画", "色彩", "颜色", "摄影", "构图", "艺术", "创作",
+                "音乐", "设计",
+            )),
+            ("情绪与关心", (
+                "累", "烦", "难过", "生气", "焦虑", "害怕", "压力",
+                "不开心", "失眠", "哭",
+            )),
+            ("亲密互动", (
+                "想你", "爱你", "喜欢你", "抱抱", "亲亲", "撒娇",
+            )),
+        )
+        for scene, terms in scene_terms:
+            if any(term in text for term in terms):
+                return scene
+        return "日常闲聊"
+
+    @staticmethod
+    def _scene_instruction(scene):
+        instructions = {
+            "技术、Debug 或工作": (
+                "先分析问题和原因，再给出可执行步骤；"
+                "不用暧昧、撒娇或情话打断信息。"
+            ),
+            "艺术、色彩或创作": (
+                "给出具体观察和独立审美判断，不做泛泛夸赞。"
+            ),
+            "情绪与关心": (
+                "先回应导致情绪的具体事情，再给一个简短可行建议；"
+                "不主动提出抱、亲、按摩、摸头等肢体接触，"
+                "不使用宝贝等昵称，不立即进入深情安慰。"
+            ),
+            "亲密互动": (
+                "可以回应亲密情绪，但保持自然，不堆叠情话或占有欲。"
+            ),
+            "日常闲聊": (
+                "用自然、轻松且有个人观察的方式回应；"
+                "不强行调情，不每轮追问。"
+            ),
+        }
+        return instructions[scene]
 
     def _on_chat_success(self, result):
         chat_result, context = result
