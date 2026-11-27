@@ -53,5 +53,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon="NONE",
+    icon=str(ROOT / "miaomiao-all-actions" / "图标.ico"),
 )

@@ -385,6 +385,8 @@ class SQLiteMemoryService(MemoryService):
                         session_id: str | None = None) -> MemoryEntry:
         if kind not in {"episodic", "preference"}:
             raise ValueError("user-managed memory must be episodic or preference")
+        if not self.is_enabled(character_id):
+            raise RuntimeError("记忆已关闭，无法新增长期记忆")
         return self.add_message(
             character_id, session_id or "manual", "user", content, kind=kind
         )
@@ -449,13 +451,20 @@ class SQLiteMemoryService(MemoryService):
         prompt_parts = [character_prompt]
         used_ids: list[int] = []
         token_count = self._estimate_tokens(character_prompt)
+        reserve = self._estimate_tokens(current_query) + 100
+        # The character prompt may legitimately occupy more than 45% of the
+        # context budget.  The old absolute 45% ceiling then rejected every
+        # memory even though ample total budget remained.  Allow managed and
+        # retrieved memories to use the next portion of the real budget while
+        # retaining room for recent dialogue and the current turn.
+        memory_ceiling = min(int(budget_tokens * 0.70), budget_tokens - reserve)
         memory_lines = []
         for entry in candidates:
             label = {"preference": "用户偏好", "episodic": "情景记忆",
                      "summary": "历史摘录"}.get(entry.kind, "相关记忆")
             line = f"[{label} memory:{entry.id}] {entry.content}"
             cost = self._estimate_tokens(line)
-            if token_count + cost > int(budget_tokens * 0.45):
+            if token_count + cost > memory_ceiling:
                 continue
             memory_lines.append(line)
             used_ids.append(entry.id)
@@ -463,10 +472,11 @@ class SQLiteMemoryService(MemoryService):
         if memory_lines:
             prompt_parts.append(
                 "以下内容来自真实保存的对话或用户编辑的记忆；编号用于事实追溯。"
-                "不要补写其中没有的经历：\n" + "\n".join(memory_lines)
+                "这些是关于用户的已知事实；当用户询问自己的偏好、经历或要求回忆时，"
+                "应优先依据相关记忆直接回答。不要补写其中没有的经历：\n"
+                + "\n".join(memory_lines)
             )
         output: list[dict[str, str]] = []
-        reserve = self._estimate_tokens(current_query) + 100
         for entry in recent:
             cost = self._estimate_tokens(entry.content)
             if token_count + cost > budget_tokens - reserve:

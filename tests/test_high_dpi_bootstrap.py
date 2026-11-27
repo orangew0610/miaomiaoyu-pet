@@ -21,6 +21,17 @@ def test_application_rejects_a_second_pet_process() -> None:
     assert "if not instance_lock.tryLock(0):" in main_source
 
 
+def test_application_and_executable_use_the_character_icon() -> None:
+    source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
+    spec = Path("DebugPet.spec").read_text(encoding="utf-8")
+
+    assert Path("miaomiao-all-actions/图标.png").is_file()
+    assert Path("miaomiao-all-actions/图标.ico").is_file()
+    assert 'APP_ICON = os.path.join(GIF_DIR, "图标.png")' in source
+    assert "app.setWindowIcon(QIcon(get_resource_path(APP_ICON)))" in source
+    assert 'icon=str(ROOT / "miaomiao-all-actions" / "图标.ico")' in spec
+
+
 def test_pet_uses_fixed_native_pixel_size_without_screen_resize_loop() -> None:
     source = Path("debug_pet_pyqt.py").read_text(encoding="utf-8")
 

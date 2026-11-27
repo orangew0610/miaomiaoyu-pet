@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -10,11 +11,51 @@ import keyring
 
 APP_ID = "DebugPet"
 KEYRING_SERVICE = "DebugPet.ModelService"
+STARTUP_VALUE_NAME = "DebugPet"
 
 
 def default_config_dir() -> Path:
     root = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
     return Path(root) / APP_ID if root else Path.home() / ".debugpet"
+
+
+def startup_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{Path(sys.executable).resolve()}"'
+    script = Path(sys.argv[0]).resolve()
+    return f'"{Path(sys.executable).resolve()}" "{script}"'
+
+
+def is_startup_enabled() -> bool:
+    if sys.platform != "win32":
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+        ) as key:
+            value, _kind = winreg.QueryValueEx(key, STARTUP_VALUE_NAME)
+        return bool(value)
+    except FileNotFoundError:
+        return False
+
+
+def set_startup_enabled(enabled: bool) -> None:
+    if sys.platform != "win32":
+        return
+    import winreg
+    path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as key:
+        if enabled:
+            winreg.SetValueEx(
+                key, STARTUP_VALUE_NAME, 0, winreg.REG_SZ, startup_command()
+            )
+        else:
+            try:
+                winreg.DeleteValue(key, STARTUP_VALUE_NAME)
+            except FileNotFoundError:
+                pass
 
 
 @dataclass(slots=True)

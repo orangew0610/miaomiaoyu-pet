@@ -1,5 +1,7 @@
 import shutil
 
+import pytest
+
 from debugpet.services.memory import SQLiteMemoryService
 
 
@@ -118,6 +120,21 @@ def test_context_contains_recent_and_relevant_memory_with_budget(tmp_path) -> No
     assert "用户偏好安静的海边" in context.system_prompt
     assert any("水母灯" in item["content"] for item in context.messages)
     assert context.estimated_tokens <= 500
+
+
+def test_large_character_prompt_does_not_crowd_out_managed_memory(tmp_path) -> None:
+    service = SQLiteMemoryService(tmp_path / "memory.sqlite3")
+    memory = service.add_user_memory("miaomiao", "我想吃寿司", "preference")
+    large_prompt = "人物设定" * 1800
+
+    context = service.build_context(
+        "miaomiao", "想吃我爱吃的", large_prompt, budget_tokens=8000,
+        session_id="current-save",
+    )
+
+    assert memory.id in context.injected_memory_ids
+    assert "我想吃寿司" in context.system_prompt
+    assert context.estimated_tokens <= 8000
     assert context.injected_memory_ids
 
 
@@ -146,6 +163,16 @@ def test_disable_memory_stops_storage_and_injection(tmp_path) -> None:
     assert service.recent_messages("miaomiao") == []
     context = service.build_context("miaomiao", "当前问题", "角色设定")
     assert context.messages == ({"role": "user", "content": "当前问题"},)
+
+
+def test_disabled_memory_rejects_managed_memory_instead_of_silent_success(tmp_path) -> None:
+    service = SQLiteMemoryService(tmp_path / "memory.sqlite3")
+    service.set_enabled("miaomiao", False)
+
+    with pytest.raises(RuntimeError, match="记忆已关闭"):
+        service.add_user_memory("miaomiao", "我喜欢海边", "preference")
+
+    assert service.list_entries("miaomiao") == []
 
 
 def test_deleting_summarized_source_invalidates_summary(tmp_path) -> None:

@@ -20,10 +20,13 @@ from datetime import datetime
 
 from debugpet.services.api import ModelApiClient
 from debugpet.services.behavior import BehaviorState, DiagnosticBehavior
-from debugpet.services.config import ConfigService, ModelConfig
+from debugpet.services.config import (
+    ConfigService, ModelConfig, is_startup_enabled, set_startup_enabled,
+)
 from debugpet.services.diagnostics import DiagnosticEvent, DiagnosticGate, Severity
 from debugpet.services.ipc import DiagnosticIpcServer
 from debugpet.services.memory import NullMemoryService, SQLiteMemoryService
+from debugpet.services.reminders import ReminderService
 from debugpet.services.screens import DesktopRect, clamp_window, nearest_rect, union_rects
 from debugpet.services.visual_locator import locate_vscode_decoration
 from debugpet.services.window_locator import (
@@ -39,11 +42,12 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QMenu, QMessageBox,
     QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, 
     QScrollArea, QFrame, QDialog, QLineEdit, QFileDialog, QComboBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog
+    QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog,
+    QDateTimeEdit, QDateEdit, QTimeEdit, QFormLayout
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QPropertyAnimation, 
-    QEasingCurve, QRect, pyqtSignal, QThread, QLockFile
+    QEasingCurve, QRect, pyqtSignal, QThread, QLockFile, QDateTime
 )
 from PyQt5.QtGui import (
     QMovie, QPixmap, QImage, QPainter, QPen, QColor,
@@ -62,6 +66,7 @@ except ImportError:
 APP_NAME = "Debug Pet"
 VERSION = "1.0.0"
 GIF_DIR = "miaomiao-all-actions"
+APP_ICON = os.path.join(GIF_DIR, "图标.png")
 
 # 获取资源文件路径（支持 PyInstaller 打包）
 def get_resource_path(relative_path):
@@ -207,6 +212,9 @@ class PetWindow(QWidget):
         
         # 初始化 UI（包含加载动画）
         self._init_ui()
+
+        self.reminder_service = ReminderService()
+        self.reminder_worker = None
         
         # 设置定时器
         self._setup_timers()
@@ -553,6 +561,12 @@ class PetWindow(QWidget):
         self.cursor_linger_timer = QTimer(self)
         self.cursor_linger_timer.setSingleShot(True)
         self.cursor_linger_timer.timeout.connect(self._finish_cursor_linger)
+
+        self.reminder_timer = QTimer(self)
+        self.reminder_timer.timeout.connect(self._poll_reminders)
+        self.reminder_timer.setInterval(30000)
+        self.reminder_timer.start()
+        QTimer.singleShot(1500, self._poll_reminders)
     
     def _set_state(self, state):
         motion_mode = getattr(self, '_motion_mode', None)
@@ -1807,6 +1821,7 @@ class PetWindow(QWidget):
         menu.addAction(f"🐛 {APP_NAME} v{VERSION}").setEnabled(False)
         menu.addSeparator()
         menu.addAction("💬 和我对话", self._chat_with_pet)
+        menu.addAction("⏰ 待办与提醒", self._show_reminders)
         menu.addAction("🔍 检查代码", self._show_code_checker)
         menu.addAction("📁 打开文件", self._open_file)
         menu.addSeparator()
@@ -1818,6 +1833,42 @@ class PetWindow(QWidget):
         menu.exec_(event.globalPos())
     
     # ============== 功能方法 ==============
+    def _poll_reminders(self):
+        if self.reminder_worker is not None:
+            return
+        self.reminder_worker = ApiRequestWorker(
+            self.reminder_service.claim_due, self
+        )
+        self.reminder_worker.succeeded.connect(self._on_reminders_due)
+        self.reminder_worker.failed.connect(
+            lambda error: print(f"[REMINDER] poll failed: {error}")
+        )
+
+        def finished():
+            if self.reminder_worker:
+                self.reminder_worker.deleteLater()
+                self.reminder_worker = None
+
+        self.reminder_worker.finished.connect(finished)
+        self.reminder_worker.start()
+
+    def _on_reminders_due(self, reminders):
+        if not reminders:
+            return
+        if len(reminders) == 1:
+            message = f"到时间了：{reminders[0].title}"
+        else:
+            preview = "、".join(item.title for item in reminders[:3])
+            suffix = f"等 {len(reminders)} 项" if len(reminders) > 3 else ""
+            message = f"有待办到时间了：{preview}{suffix}"
+        self._update_bubble(message, PET_STATE_HAPPY)
+        QTimer.singleShot(12000, self.bubble_window.hide)
+
+    def _show_reminders(self):
+        dialog = ReminderManagerDialog(self.reminder_service, self)
+        dialog.changed.connect(self._poll_reminders)
+        dialog.exec_()
+
     def _show_code_checker(self, code_content=None):
         """显示代码检查器"""
         self._update_bubble("正在分析代码...", PET_STATE_THINKING)
@@ -2230,6 +2281,283 @@ class CodeCheckerDialog(QDialog):
         return errors
 
 
+# ============== 待办与提醒 ==============
+class ReminderEditDialog(QDialog):
+    RECURRENCE_OPTIONS = (
+        ("单次", "once"), ("每天", "daily"),
+        ("工作日（周一至周五）", "weekdays"), ("周末（周六、周日）", "weekends"),
+        ("每周", "weekly"), ("每月", "monthly"), ("每年", "yearly"),
+        ("自定义星期", "custom"),
+    )
+    DAY_LABELS = ("一", "二", "三", "四", "五", "六", "日")
+
+    def __init__(self, parent=None, reminder=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑提醒" if reminder else "新建提醒")
+        self.resize(560, 360)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("例如：上班打卡、提交周报、准备会议")
+        form.addRow("待办内容：", self.title_input)
+        initial = QDateTime.currentDateTime().addSecs(3600)
+        self.date_input = QDateEdit(initial.date())
+        self.date_input.setCalendarPopup(True)
+        self.date_input.setDisplayFormat("yyyy-MM-dd")
+        self.date_label = QLabel("日期：")
+        form.addRow(self.date_label, self.date_input)
+        self.time_input = QTimeEdit(initial.time())
+        self.time_input.setDisplayFormat("HH:mm")
+        form.addRow("时间：", self.time_input)
+        self.recurrence_combo = QComboBox()
+        for label, value in self.RECURRENCE_OPTIONS:
+            self.recurrence_combo.addItem(label, value)
+        form.addRow("重复：", self.recurrence_combo)
+        self.days_widget = QWidget()
+        days_layout = QHBoxLayout(self.days_widget)
+        days_layout.setContentsMargins(0, 0, 0, 0)
+        self.day_buttons = []
+        for day, label in enumerate(self.DAY_LABELS):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setAutoDefault(False)
+            button.setToolTip(f"周{label}")
+            button.setProperty("weekday", day)
+            days_layout.addWidget(button)
+            self.day_buttons.append(button)
+        self.days_label = QLabel("星期：")
+        form.addRow(self.days_label, self.days_widget)
+        self.recurrence_hint = QLabel()
+        self.recurrence_hint.setWordWrap(True)
+        form.addRow("说明：", self.recurrence_hint)
+        self.enabled_button = QPushButton("已启用")
+        self.enabled_button.setCheckable(True)
+        self.enabled_button.setChecked(True)
+        self.enabled_button.setAutoDefault(False)
+        self.enabled_button.toggled.connect(
+            lambda checked: self.enabled_button.setText("已启用" if checked else "已暂停")
+        )
+        form.addRow("状态：", self.enabled_button)
+        layout.addLayout(form)
+        self.recurrence_combo.currentIndexChanged.connect(self._update_recurrence_ui)
+        if reminder:
+            self.title_input.setText(reminder.title)
+            local_due = reminder.due_at.astimezone()
+            local_qdt = QDateTime.fromString(
+                local_due.strftime("%Y-%m-%d %H:%M"), "yyyy-MM-dd HH:mm"
+            )
+            self.date_input.setDate(local_qdt.date())
+            self.time_input.setTime(local_qdt.time())
+            index = self.recurrence_combo.findData(reminder.recurrence)
+            self.recurrence_combo.setCurrentIndex(max(0, index))
+            for button in self.day_buttons:
+                button.setChecked(button.property("weekday") in reminder.repeat_days)
+            self.enabled_button.setChecked(reminder.enabled)
+        self._update_recurrence_ui()
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("取消")
+        save = QPushButton("保存")
+        for button in (cancel, save):
+            button.setAutoDefault(False)
+            buttons.addWidget(button)
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self._accept_if_valid)
+        layout.addLayout(buttons)
+
+    def _accept_if_valid(self):
+        if not self.title_input.text().strip():
+            QMessageBox.information(self, "待办内容", "请输入待办内容。")
+            return
+        if self.recurrence_combo.currentData() == "custom" and not any(
+            button.isChecked() for button in self.day_buttons
+        ):
+            QMessageBox.information(self, "自定义星期", "请至少选择一个星期。")
+            return
+        self.accept()
+
+    def _update_recurrence_ui(self, _index=None):
+        recurrence = self.recurrence_combo.currentData()
+        custom = recurrence == "custom"
+        self.days_label.setVisible(custom)
+        self.days_widget.setVisible(custom)
+        self.date_label.setText("日期：" if recurrence == "once" else "开始日期：")
+        hints = {
+            "once": "仅在所选日期和时间提醒一次。",
+            "daily": "从开始日期起，每天在所选时间提醒。",
+            "weekdays": "从开始日期起，每周一至周五在所选时间提醒。",
+            "weekends": "从开始日期起，每周六、周日在所选时间提醒。",
+            "weekly": "从开始日期起，每周在同一星期和时间提醒。",
+            "monthly": "从开始日期起，每月同一日期提醒；短月份自动使用月末。",
+            "yearly": "从开始日期起，每年同一月日在所选时间提醒。",
+            "custom": "从开始日期起，仅在勾选的星期和所选时间提醒。",
+        }
+        self.recurrence_hint.setText(hints.get(recurrence, ""))
+
+    def values(self):
+        due_at = QDateTime(
+            self.date_input.date(), self.time_input.time()
+        ).toPyDateTime()
+        if due_at.tzinfo is None:
+            due_at = due_at.astimezone()
+        repeat_days = tuple(
+            int(button.property("weekday"))
+            for button in self.day_buttons if button.isChecked()
+        ) if self.recurrence_combo.currentData() == "custom" else ()
+        return (
+            self.title_input.text().strip(), due_at,
+            self.recurrence_combo.currentData(), self.enabled_button.isChecked(),
+            repeat_days,
+        )
+
+
+class ReminderManagerDialog(QDialog):
+    changed = pyqtSignal()
+
+    def __init__(self, reminder_service, parent=None):
+        super().__init__(parent)
+        self.reminder_service = reminder_service
+        self.workers = []
+        self.setWindowTitle("⏰ 待办与提醒")
+        self.resize(900, 560)
+        layout = QVBoxLayout(self)
+        self.status_label = QLabel(
+            "提醒保存在本地；桌宠运行时到点会主动显示气泡。"
+        )
+        layout.addWidget(self.status_label)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "待办内容", "下次提醒", "重复", "状态"]
+        )
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 60)
+        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(3, 160)
+        self.table.setColumnWidth(4, 100)
+        self.table.doubleClicked.connect(self._edit)
+        layout.addWidget(self.table)
+        buttons = QHBoxLayout()
+        for label, callback in (
+            ("新建", self._add), ("编辑", self._edit),
+            ("完成", self._complete), ("启用/暂停", self._toggle),
+            ("删除", self._delete),
+        ):
+            button = QPushButton(label)
+            button.setAutoDefault(False)
+            button.clicked.connect(callback)
+            buttons.addWidget(button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        self._reload()
+
+    def _run(self, operation, success=None):
+        worker = ApiRequestWorker(operation, self)
+        self.workers.append(worker)
+        if success:
+            worker.succeeded.connect(success)
+        worker.failed.connect(lambda error: self.status_label.setText(f"操作失败：{error}"))
+        def cleanup():
+            if worker in self.workers:
+                self.workers.remove(worker)
+            worker.deleteLater()
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _reload(self):
+        self._run(self.reminder_service.list_all, self._show_rows)
+
+    def _show_rows(self, reminders):
+        recurrence_names = {
+            "once": "单次", "daily": "每天", "weekdays": "工作日",
+            "weekends": "周末", "weekly": "每周", "monthly": "每月",
+            "yearly": "每年", "custom": "自定义星期",
+        }
+        self.table.setRowCount(len(reminders))
+        for row, reminder in enumerate(reminders):
+            if reminder.completed:
+                status = "已完成"
+            elif reminder.recurrence == "once" and reminder.last_triggered_at and not reminder.enabled:
+                status = "已提醒"
+            else:
+                status = "已启用" if reminder.enabled else "已暂停"
+            repeat_name = recurrence_names.get(reminder.recurrence, reminder.recurrence)
+            if reminder.recurrence == "custom":
+                day_names = ("一", "二", "三", "四", "五", "六", "日")
+                repeat_name = "每周" + "、".join(
+                    day_names[day] for day in reminder.repeat_days
+                )
+            values = [
+                str(reminder.id), reminder.title,
+                reminder.due_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+                repeat_name, status,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.UserRole, reminder)
+                self.table.setItem(row, column, item)
+        self.status_label.setText(f"共 {len(reminders)} 项待办与提醒。")
+
+    def _selected(self):
+        row = self.table.currentRow()
+        if row < 0:
+            self.status_label.setText("请先选择一项待办。")
+            return None
+        item = self.table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _after_change(self, _result=None):
+        self.changed.emit()
+        self._reload()
+
+    def _add(self):
+        dialog = ReminderEditDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            title, due_at, recurrence, enabled, repeat_days = dialog.values()
+            self._run(
+                lambda: self.reminder_service.create(
+                    title, due_at, recurrence, enabled, repeat_days
+                ),
+                self._after_change,
+            )
+
+    def _edit(self, _index=None):
+        reminder = self._selected()
+        if not reminder:
+            return
+        dialog = ReminderEditDialog(self, reminder)
+        if dialog.exec_() == QDialog.Accepted:
+            title, due_at, recurrence, enabled, repeat_days = dialog.values()
+            self._run(
+                lambda: self.reminder_service.update(
+                    reminder.id, title, due_at, recurrence, enabled, repeat_days
+                ), self._after_change,
+            )
+
+    def _complete(self):
+        reminder = self._selected()
+        if reminder:
+            self._run(lambda: self.reminder_service.complete(reminder.id), self._after_change)
+
+    def _toggle(self):
+        reminder = self._selected()
+        if reminder and not reminder.completed:
+            self._run(
+                lambda: self.reminder_service.set_enabled(reminder.id, not reminder.enabled),
+                self._after_change,
+            )
+
+    def _delete(self):
+        reminder = self._selected()
+        if reminder and QMessageBox.question(
+            self, "删除待办", f"确认删除“{reminder.title}”？"
+        ) == QMessageBox.Yes:
+            self._run(lambda: self.reminder_service.delete(reminder.id), self._after_change)
+
+
 # ============== 设置对话框 ==============
 class SettingsDialog(QDialog):
     """设置对话框 - 粉紫蓝主题"""
@@ -2259,11 +2587,17 @@ class SettingsDialog(QDialog):
         """加载设置"""
         self.config_service = ConfigService()
         self.model_config = self.config_service.load()
-        self.api_key = self.config_service.get_api_key(self.model_config.provider)
+        self._provider_keys = {
+            "deepseek": self.config_service.get_api_key("deepseek"),
+            "glm": self.config_service.get_api_key("glm"),
+        }
+        self._selected_provider = self.model_config.provider
+        self.api_key = self._provider_keys.get(self._selected_provider, "")
         self.api_url = self.model_config.api_url
         self.ai_service = self.model_config.provider
         self.model_name = self.model_config.model
         self.use_ai = self.model_config.ai_enabled
+        self.startup_enabled = is_startup_enabled()
 
     def _init_ui(self):
         """初始化 UI - 粉紫蓝主题"""
@@ -2341,7 +2675,7 @@ class SettingsDialog(QDialog):
 
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("输入 API Key (GLM 无需 Key)")
+        self.api_key_input.setPlaceholderText("输入当前模型服务的 API Key")
         self.api_key_input.setStyleSheet("""
             QLineEdit {
                 background-color: rgba(255, 243, 250, 255);
@@ -2426,6 +2760,12 @@ class SettingsDialog(QDialog):
         self.allow_code_upload_checkbox.setStyleSheet(self.use_ai_checkbox.styleSheet())
         layout.addWidget(self.allow_code_upload_checkbox)
 
+        self.startup_checkbox = QPushButton("🚀 开机自动启动")
+        self.startup_checkbox.setCheckable(True)
+        self.startup_checkbox.setChecked(self.startup_enabled)
+        self.startup_checkbox.setStyleSheet(self.use_ai_checkbox.styleSheet())
+        layout.addWidget(self.startup_checkbox)
+
         layout.addStretch()
 
         # 按钮区域
@@ -2480,17 +2820,26 @@ class SettingsDialog(QDialog):
         self.setLayout(layout)
     
     def _on_service_changed(self, service_name):
-        """当 AI 服务改变时，自动更新 API URL"""
+        """切换服务时隔离密钥草稿并回填对应凭据。"""
+        self._provider_keys[self._selected_provider] = self.api_key_input.text().strip()
+        provider = self._provider_from_service_name(service_name)
+        self._selected_provider = provider
+        self.api_key_input.setText(self._provider_keys.get(provider, ""))
         if service_name == "DeepSeek":
             self.api_url_input.setText("https://api.deepseek.com/chat/completions")
             self.model_input.setText("deepseek-chat")
         elif service_name == "GLM-4.7-Flash":
             self.api_url_input.setText("https://open.bigmodel.cn/api/paas/v4/chat/completions")
             self.model_input.setText("glm-4-flash")
+
+    @staticmethod
+    def _provider_from_service_name(service_name):
+        return "deepseek" if service_name == "DeepSeek" else "glm"
     
     def _save_settings(self):
         """保存设置"""
-        provider = "deepseek" if self.service_combo.currentText() == "DeepSeek" else "glm"
+        provider = self._provider_from_service_name(self.service_combo.currentText())
+        self._provider_keys[provider] = self.api_key_input.text().strip()
         config = ModelConfig(
             provider=provider,
             api_url=self.api_url_input.text().strip(),
@@ -2501,7 +2850,13 @@ class SettingsDialog(QDialog):
             context_budget_tokens=self.model_config.context_budget_tokens,
         )
         self.config_service.save(config)
-        self.config_service.set_api_key(provider, self.api_key_input.text().strip())
+        for key_provider, api_key in self._provider_keys.items():
+            self.config_service.set_api_key(key_provider, api_key)
+        try:
+            set_startup_enabled(self.startup_checkbox.isChecked())
+        except OSError as error:
+            QMessageBox.critical(self, "开机自启设置失败", str(error))
+            return
         
         self.accept()
 
@@ -2521,6 +2876,7 @@ class MemoryDialog(QDialog):
         self.character_id = character_id
         self.active_session_id = active_session_id
         self.workers = []
+        self.memory_enabled = False
         self.setWindowTitle("🧠 记忆管理")
         self.resize(900, 680)
         self._init_ui()
@@ -2630,6 +2986,7 @@ class MemoryDialog(QDialog):
 
     def _show_entries(self, result):
         entries, enabled, sessions = result
+        self.memory_enabled = enabled
         visible_sessions = list(sessions)
         if self.active_session_id and not any(
             session["session_id"] == self.active_session_id
@@ -2678,10 +3035,16 @@ class MemoryDialog(QDialog):
                 self.table.setItem(row, column, item)
         self.enabled_button.setChecked(enabled)
         self.enabled_button.setText("记忆已启用" if enabled else "记忆已关闭")
-        self.status_label.setText(
+        status = (
             f"对话存档 {len(visible_sessions)} 个；长期记忆 {len(entries)} 条。"
             "不同角色的数据彼此隔离。"
         )
+        if not enabled:
+            status = (
+                "⚠ 记忆已关闭：新对话不会自动存档，也不会读取或新增长期记忆。"
+                "点击右下角“记忆已关闭”可重新启用。"
+            )
+        self.status_label.setText(status)
 
     def _selected(self):
         row = self.table.currentRow()
@@ -2734,6 +3097,13 @@ class MemoryDialog(QDialog):
         )
 
     def _add_memory(self):
+        if not self.memory_enabled:
+            QMessageBox.information(
+                self,
+                "记忆已关闭",
+                "请先点击右下角“记忆已关闭”重新启用记忆，再新增长期记忆。",
+            )
+            return
         labels = ["偏好/习惯", "经历/事件"]
         selected, accepted = QInputDialog.getItem(
             self, "新增长期记忆", "记忆类型：", labels, 0, False
@@ -2784,6 +3154,17 @@ class MemoryDialog(QDialog):
             )
 
     def _toggle_enabled(self, checked):
+        if not checked and QMessageBox.question(
+            self,
+            "关闭记忆",
+            "关闭后，新对话不会自动存档，长期记忆也不会被读取或新增。\n\n"
+            "已有数据不会删除。确定关闭吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            self.enabled_button.setChecked(True)
+            self.enabled_button.setText("记忆已启用")
+            return
         self.enabled_button.setText("记忆已启用" if checked else "记忆已关闭")
         self._run_async(
             lambda: self.memory_service.set_enabled(self.character_id, checked),
@@ -3183,6 +3564,9 @@ class ChatDialog(QDialog):
             f"- 本地时间：{local_time}\n"
             f"- 对话场景：{scene}\n"
             f"- 本场景执行规则：{scene_instruction}\n"
+            "- 身份锚点：你就是祁煜。用户叫“小鱼”“祁老师”"
+            "“大画家”或“祁煜”时默认是在叫你。画家是你的职业；"
+            "不得仅因用户提到画画就推断那是用户的专业或职业。\n"
             "请按场景规则自然回应。语料库只用于理解语感，"
             "不要直接复读，不要无缘由地调情。"
         )
@@ -3266,6 +3650,9 @@ class ChatDialog(QDialog):
             ),
             "日常闲聊": (
                 "用自然、轻松且有个人观察的方式回应；"
+                "先直接回答用户的问题，保持熟悉、亲近且有回应欲；"
+                "毒舌只能用于已有玩笑语境，不表现得不耐烦或嫌用户麻烦；"
+                "涉及用户偏好或经历时优先采用提供的真实记忆；"
                 "不强行调情，不每轮追问。"
             ),
         }
@@ -3300,6 +3687,7 @@ def main():
     enable_per_monitor_dpi_awareness()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(get_resource_path(APP_ICON)))
 
     # Two independent top-level pet processes look exactly like the historic
     # dual-screen flicker bug. Keep the lock alive for the whole event loop so
